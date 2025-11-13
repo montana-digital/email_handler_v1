@@ -1,0 +1,184 @@
+Python and Streamlit based app.
+
+Main / Home Page
+Basic information about the app. Launches into this window as the main file for the multipage Streamlit instance.
+
+Deploy Scripts
+Function to deploy a PowerShell ISE instance on Windows and run a PowerShell script that will populate the input folder with emails - once complete. The user returns to Email Handler to process the emails.
+	- Can we do something with streamlit that will allow it to deploy a PowerShell script provided by the user.
+	- Streamlit does not need to interact with the powershell script, just launc an instance of PowerShell ISE - with script file preloaded or with instructs to user to how to use the PowerShell file.
+There may be future additions of other scripts that will need to be launched, so let's build for such a page. Each script deployment can be added into the app by the user by uploading a ps1 script. 
+
+Settings
+	- Email Input Repo
+	- Database Source
+		○ With basic info about database size
+	- Output Directory
+
+Database Tables
+
+Input_Emails
+	- Sender of Email
+	- CC on the email
+	- Email Subject
+	- Date sent
+	- In the Email Body:
+		○ Subject:
+		○ Date Reported:
+		○ Sending Source
+		○ SS_Parsed
+		○ URL:
+		○ URL_Parsed
+		○ Callback Number
+		○ CN_Parsed
+		○ Additional Contacts
+		○ Model Confidence
+		○ Message-ID
+		○ Image (as Base64)
+		○ Whole email body as Html
+	- Email Hash (to regenerate the email)
+	
+	
+Standard_Emails
+	- To
+	- From
+	- CC 
+	- Subject
+	- Date sent
+	- Email Size
+	- Email Body as HTML
+	- Body_TN_Parser
+	- Body_URLs_Parser
+	Email Hash (to regenerate the email)
+
+
+
+Email Display and Filter
+
+Once the parser is complete, and a Pickle file is available to view the data is uploaded to the email database. The email files are hashed, so they can be regenerated from the database (this is a function request)
+
+Email Display
+This feature will be available once the emails User will see the Email Display page which will contain the title, description, in next container a search panel, with Search
+
+The emails in the input folder maybe MSG or eml files. We would like to initially run the parser to identify if the email contain any data that can be parsed out and populated into the summary table, that will contain the parser columns. The parser makes a best effort to identify the column id and the associated value for that field. If not, it put a not available marker in the field. Not all emails will have these fields, we are expecting to get partial row competition on most emails.
+Once all the emails are processed the data table is saved as a Pickle file, and the data is loaded from that Pickle file into the Email Display.
+
+Above, search should be a drop down that lists all the available Pickle files
+
+Under the search, there should be a list view of all the emails processed and loaded from the Pickle File in a table showing all the columns Except image base64 and Email hash code.
+This list should adapt to display user queries or filters in the search panel.
+
+The user should be able to select an email from the list, which will display another container that frames out the content with all the fields displayed including the image, also information if the subjectID of the image also hits on any records in the other Tables containing Standard images or other images or attachments
+
+The user should be able to make edits in the interface which will update the Pickle file.
+
+Once the user has finished reviewing the Pickle batch of emails, they can press upload to Database, where the the Pickle will be uploaded to the 
+
+Once the parser is complete, the data is uploaded to the email database. 
+The email files are hashed, so they can be regenerated from the database (this is a function request)
+
+User should be able to select multiple and run operations:
+	- Extract all attachments - placed into created folders - images, emails, other
+		○ Extracts placed appropriately.
+		○ Each attachment should be labeled with the appropraite subjectID in the file title.
+
+Attachment Diplay
+User selects from Dropdown - Images, Emails or Other 
+
+Images - Similar to the Email Display
+	- Displays the image as well as the details related to the images fetched from the other tabled that match on the subjectID
+	- We should have a URL, Callback Number, Sending Source and list of related files found.
+	- User should be able to edit the information related to that image in the fields.
+
+Emails
+	- Run Parser2 on the emails generating a Pickle file with the contents of the emails
+	- Similar to Email Display, we should be able see a list view and select a detailed view of the email.
+	- Additionally we should be able to select bulk emails, and generate an aggregated report as a HTML, which includes the images from the email, as well as the email body as the original view HTML.
+	- Similarly a list of related records in other tables.
+	- User should be able to bulk select and 'Add to Standard_Emails' Table.
+
+Other Files
+	- Dropdown panels containing information on the Files. In future additions we may add functions to process a view for certain file types here.
+
+Each of the views should contain a button to download the image, email or as a package (all of the artifcats related to that record in a zip file)
+
+
+
+PARSERS
+Parser1 - First Process Emails
+Key Fields looking to parse out include:
+	- Sender of Email
+	- CC on the email
+	- Email Subject
+	- In the Email Body:
+		○ Subject:
+		○ Date Reported:
+		○ Sending Source
+		○ URL:
+		○ Callback Number
+		○ Additional Contacts
+		○ Model Confidence
+		○ Message-ID
+		○ Image (as Base64)
+		○ Whole email body as Html
+
+Example:
+	- 'Date Reported: 2025-11-12T19:54:38' becomes 20251112T195438 to become the subjectID
+	- As well as 'Date Reported: 2025-11-12T19:54:38' becomes 2025-11-12T19:54:38 to become the Date Reported
+	- 'Sending Source: 888-111-1111' becomes 18881111111 in the Sending Source
+
+Run Parser3 and Parser4 on Fields, to generate a field next door with output:
+	- Sending Source
+	- URL
+	- Callback Number
+
+Database Table for these emails, containing following Fields:
+	- Sender of Email
+	- CC on the email
+	- Email Subject
+	- Date sent
+	- In the Email Body:
+		○ Subject:
+		○ Date Reported:
+		○ Sending Source
+		○ SS_Parsed
+		○ URL:
+		○ URL_Parsed
+		○ Callback Number
+		○ CN_Parsed
+		○ Additional Contacts
+		○ Model Confidence
+		○ Message-ID
+		○ Image (as Base64)
+		○ Whole email body as Html
+	- Email Hash (to regenerate the email)
+
+	
+Parser2 - Standard Emails
+	- Runs on an email file and extracts the key information
+		○ To 
+		○ From
+		○ CC
+		○ Subject
+		○ Date sent
+		○ Email Body as HTML
+		○ Email Size
+Running Parser3 and Parser4 on the Email Body HTML.
+Database Table for Parse2 Database Inputs for these emails, containing following Fields:
+	- To
+	- From
+	- CC 
+	- Subject
+	- Date sent
+	- Email Size
+	- Email Body as HTML
+	- Body_TN_Parser
+	- Body_URLs_Parser
+	Email Hash (to regenerate the email)
+
+
+Parser3 - URLs from Texts
+	- Advanced URL Parser that can identify URLs in various domain formats. We are essentially looking for the base domains and TLD to be present, but often there will be protocols, various available TLDs in modern domain space, as well as varied length paths - so the parser must be quite advanced, as these will be found in large text bodies of emails or transcripts. Being able to identify many domains in a text. Return list of domains
+
+Parser4 - Phone Numbers from Texts
+	- Same, be able to identify a validate format of a phone number identified in a text blub. International numbers but primarily US numbers, which could be in various formats, in which phone numbers are written. Parser must be as best effort to identify all possible phone numbers in a text blub, return list of phone numbers

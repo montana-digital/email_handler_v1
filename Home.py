@@ -1,0 +1,19 @@
+"""Root entrypoint for the Streamlit email handler app."""
+
+from __future__ import annotations
+
+import streamlit as st
+
+from app.ui.bootstrap import prepare_page
+from app.ui.pages import home
+
+
+def main() -> None:
+    st.set_page_config(page_title="Email Handler", layout="wide")
+    state = prepare_page()
+    home.render(state)
+
+
+if __name__ == "__main__":
+    main()
+
