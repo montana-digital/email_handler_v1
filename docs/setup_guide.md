@@ -45,6 +45,7 @@ The launcher calls `streamlit run Home.py`, which is the root page of the multip
 3. The app resolves `powershell.exe`/`pwsh`, runs the script, and streams stdout/stderr plus the exit code. Recent runs are listed for quick review.
 4. Each script should output downloaded emails (and attachments) into the configured input folder (`data\input` by default). Use the sidebar **Open Input** button to jump there.
 5. After downloads complete, switch to **Email Display** to ingest and review the new batch.
+6. Populate `data\scripts\manifest.json` to supply friendly metadata, default arguments, and working-directory placeholders (for example `%INPUT_DIR%`, `%OUTPUT_DIR%`). Scripts without manifest entries still run, but display basic details only.
 
 ## 5. Directory Overview
 | Path | Purpose |
@@ -65,6 +66,7 @@ The launcher calls `streamlit run Home.py`, which is the root page of the multip
 - Keep PowerShell scripts versioned separately and review them regularly for access or API changes.
 - Update directories or database settings via the **Settings** page; changes are persisted to `.env`, folders are created automatically, and the SQLite engine reloads in-place.
 - Use the sidebar **Open Input** / **Open Output** buttons for quick navigation while debugging scripts.
+- When adding new scripts, register them in the manifest so analysts see descriptions, suggested arguments, and confirmation requirements before execution.
 
 ## 7. Troubleshooting
 - **Missing Streamlit executable**: re-run `python scripts\setup_env.py`.

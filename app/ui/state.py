@@ -25,6 +25,8 @@ class AppState:
 
     def record_script_run(self, run: dict) -> None:
         self.script_runs.append(run)
+        if len(self.script_runs) > 10:
+            self.script_runs = self.script_runs[-10:]
 
 
 def get_state(*, config: Optional[AppConfig] = None) -> AppState:

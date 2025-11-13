@@ -1,0 +1,17 @@
+{
+  "Create-TestFolder.ps1": {
+    "displayName": "Create Test Folder",
+    "description": "Creates a subdirectory for validation runs using default arguments.",
+    "defaultArgs": "-FolderName test_run",
+    "workingDirectory": "%INPUT_DIR%",
+    "requiresConfirmation": false
+  },
+  "test1.ps1": {
+    "displayName": "Test Script 1",
+    "description": "Sample script placeholder for demonstrations.",
+    "defaultArgs": "",
+    "workingDirectory": "%SCRIPTS_DIR%",
+    "requiresConfirmation": true
+  }
+}
+

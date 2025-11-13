@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import shutil
 import subprocess
@@ -9,9 +10,21 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Dict, Mapping, Sequence
 
 from loguru import logger
+
+from app.config import AppConfig, PROJECT_ROOT, load_config
+
+MANIFEST_FILENAME = "manifest.json"
+PLACEHOLDER_MAP = {
+    "%PROJECT_ROOT%": lambda cfg: PROJECT_ROOT,
+    "%INPUT_DIR%": lambda cfg: cfg.input_dir,
+    "%OUTPUT_DIR%": lambda cfg: cfg.output_dir,
+    "%CACHE_DIR%": lambda cfg: cfg.pickle_cache_dir,
+    "%SCRIPTS_DIR%": lambda cfg: cfg.scripts_dir,
+    "%LOG_DIR%": lambda cfg: cfg.log_dir,
+}
 
 
 class PowerShellNotAvailableError(RuntimeError):
@@ -39,6 +52,79 @@ class PowerShellRunResult:
         return self.exit_code == 0
 
 
+@dataclass(slots=True)
+class PowerShellScriptInfo:
+    """Manifest metadata describing how to run a PowerShell script."""
+
+    name: str
+    display_name: str
+    description: str | None = None
+    default_arguments: str | None = None
+    working_directory: str | None = None
+    requires_confirmation: bool = False
+
+    def resolved_working_directory(self, config: AppConfig) -> Path | None:
+        if not self.working_directory:
+            return None
+        path = _apply_placeholders(self.working_directory, config)
+        return Path(path).expanduser().resolve()
+
+
+def _apply_placeholders(value: str, config: AppConfig) -> str:
+    resolved = value
+    for placeholder, getter in PLACEHOLDER_MAP.items():
+        if placeholder in resolved:
+            resolved = resolved.replace(placeholder, str(getter(config)))
+    return resolved
+
+
+def load_manifest(
+    config: AppConfig | None = None,
+    *,
+    manifest_path: Path | None = None,
+) -> Dict[str, PowerShellScriptInfo]:
+    cfg = config or load_config()
+    path = manifest_path or (cfg.scripts_dir / MANIFEST_FILENAME)
+
+    if not path.exists():
+        return {}
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to load PowerShell manifest %s: %s", path, exc)
+        return {}
+
+    entries: Dict[str, PowerShellScriptInfo] = {}
+    if isinstance(data, Mapping):
+        iterator = data.items()
+    elif isinstance(data, list):
+        iterator = ((item.get("name"), item) for item in data if isinstance(item, Mapping))
+    else:
+        logger.warning("Unsupported manifest format in %s", path)
+        return {}
+
+    for name, payload in iterator:
+        if not name:
+            continue
+        script_name = str(name)
+        display_name = str(payload.get("displayName") or script_name)
+        description = payload.get("description")
+        default_args = payload.get("defaultArgs")
+        working_dir = payload.get("workingDirectory")
+        requires_confirmation = bool(payload.get("requiresConfirmation", False))
+        entries[script_name] = PowerShellScriptInfo(
+            name=script_name,
+            display_name=display_name,
+            description=description,
+            default_arguments=default_args,
+            working_directory=working_dir,
+            requires_confirmation=requires_confirmation,
+        )
+
+    return entries
+
+
 def _resolve_powershell_executable(explicit_path: str | None = None) -> str:
     """Resolve the path to the PowerShell executable."""
     if explicit_path:
@@ -64,6 +150,7 @@ def run_powershell_script(
     timeout_seconds: int | None = None,
     execution_policy: str = "Bypass",
     powershell_path: str | None = None,
+    working_directory: Path | None = None,
 ) -> PowerShellRunResult:
     """Execute a PowerShell script and capture its output."""
     resolved_script = script_path.resolve()
@@ -89,7 +176,11 @@ def run_powershell_script(
     started_at = datetime.now(timezone.utc)
     start = time.monotonic()
 
-    logger.info("Launching PowerShell script: {}", shlex.join(command))
+    logger.info(
+        "Launching PowerShell script: {} (cwd={})",
+        shlex.join(command),
+        working_directory or "default",
+    )
 
     try:
         completed = subprocess.run(
@@ -98,6 +189,7 @@ def run_powershell_script(
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            cwd=str(working_directory) if working_directory else None,
         )
     except subprocess.TimeoutExpired as exc:  # noqa: PERF203 - streamlit triggers on main thread
         logger.error("PowerShell script timed out after {} seconds: {}", exc.timeout, resolved_script)

@@ -51,7 +51,7 @@
   - `attachments.py`: manages attachment extraction, categorization, and ZIP packaging.
   - `reporting.py`: builds HTML summaries for selected emails.
   - `standard_emails.py`: promotes curated `InputEmail` records into the `StandardEmail` table with supplemental parsing.
-  - `powershell.py`: launches PowerShell scripts and captures execution output for display in the UI.
+  - `powershell.py`: launches PowerShell scripts, captures execution output, and loads manifest metadata for script UX.
   - `batch_finalization.py`: archives reviewed pickle batches, updates status, and records finalization timestamps.
 - `app/ui/`
   - `bootstrap.py`: loads configuration, initializes the database, renders the shared sidebar, and returns session state for every page.
@@ -70,8 +70,9 @@
 
 ## 6. PowerShell Integration Touchpoints
 - Deploy Scripts page resolves `powershell.exe`/`pwsh` and runs scripts in-process, capturing stdout/stderr and exit codes for analyst review.
+- Manifest-driven metadata (`data/scripts/manifest.json`) provides friendly names, default arguments, working-directory placeholders, and confirmation requirements.
 - Scripts must write emails into the configured input directory; environment setup documents expected folder names.
-- Analysts can supply ad-hoc arguments; manifest-driven metadata remains a future enhancement.
+- Analysts can still override arguments ad-hoc; manifest defaults simply provide a starting point.
 - Run history is retained per session, and sidebar buttons allow opening input/output directories for faster navigation.
 
 ## 7. Technology Stack
