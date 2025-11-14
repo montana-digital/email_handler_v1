@@ -15,6 +15,7 @@ from sqlalchemy import func
 from app.db.init_db import session_scope
 from app.db.models import Attachment, InputEmail, PickleBatch, StandardEmail
 from app.ui.state import AppState
+from docs.animations import inject_reveal_animations
 
 APP_VERSION = "0.4.0"
 KEY_DEPENDENCIES = ["streamlit", "sqlalchemy", "pandas", "pydantic", "loguru"]
@@ -135,28 +136,34 @@ def _inject_header_styles() -> None:
         <style>
         .eh-hero {
             position: relative;
-            padding: 1.5rem 0 1rem;
+            padding: 1.8rem 0 1.2rem;
         }
         .eh-title {
-            font-size: 3.05rem;
+            font-size: 3.1rem;
             margin-bottom: 0.35rem;
+            letter-spacing: -0.03em;
+        }
+        .eh-title .gold-shimmer {
             background: linear-gradient(120deg, #d6e4ff 0%, #9fb8ff 50%, #c8d7ff 100%);
             -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            animation: eh-shimmer 5.5s ease-in-out infinite alternate;
+            -webkit-text-fill-color: transparent !important;
+            color: transparent !important;
         }
-        @keyframes eh-shimmer {
-            from { filter: drop-shadow(0 0 12px rgba(120,160,255,0.35)); }
-            to { filter: drop-shadow(0 0 18px rgba(160,200,255,0.55)); }
+        .eh-tagline.silver-shimmer {
+            color: rgba(209, 213, 255, 0.85) !important;
         }
         .eh-tagline {
             color: rgba(226,232,255,0.78);
             font-size: 1.05rem;
+            margin-bottom: 0.75rem;
+        }
+        .eh-tagline--secondary {
+            opacity: 0.9;
             margin-bottom: 1.6rem;
         }
         .eh-badge {
             display: inline-flex;
-            gap: 0.75rem;
+            gap: 0.65rem;
             padding: 0.55rem 1rem;
             border-radius: 999px;
             background: rgba(18, 20, 35, 0.55);
@@ -165,10 +172,34 @@ def _inject_header_styles() -> None:
             font-size: 0.9rem;
             backdrop-filter: blur(6px);
         }
+        .eh-hero-columns {
+            display: grid;
+            gap: 28px;
+            grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr);
+            align-items: center;
+        }
+        .eh-logo-wrapper {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .eh-logo-wrapper::before,
+        .eh-logo-wrapper::after {
+            content: none;
+        }
         .eh-logo-wrapper img {
             max-width: 220px;
             border-radius: 14px;
-            box-shadow: 0 12px 28px -18px rgba(10, 15, 40, 0.85);
+            box-shadow: 0 12px 30px -18px rgba(10, 15, 40, 0.6);
+            position: relative;
+            z-index: 1;
+            animation: none;
+        }
+        @media (max-width: 820px) {
+            .eh-hero-columns {
+                grid-template-columns: 1fr;
+            }
         }
         </style>
         """,
@@ -183,12 +214,17 @@ def render(state: AppState) -> None:
     logo_path = _find_logo()
 
     _inject_header_styles()
+    inject_reveal_animations()
 
     hero_cols = st.columns([2, 1], gap="large")
     with hero_cols[0]:
-        st.markdown("<h1 class='eh-title'>Email Handler</h1>", unsafe_allow_html=True)
+        st.markdown("<h1 class='eh-title'><span class='gold-shimmer'>Email Handler</span></h1>", unsafe_allow_html=True)
         st.markdown(
-            "<p class='eh-tagline'>Local phishing triage workspace for analysts.</p>",
+            "<p class='eh-tagline silver-shimmer'>Part of the SPEAR toolkit</p>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<p class='eh-tagline eh-tagline--secondary'>Local phishing triage workspace for analysts.</p>",
             unsafe_allow_html=True,
         )
         st.markdown(
