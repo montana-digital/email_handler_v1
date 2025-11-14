@@ -184,37 +184,33 @@ def render(state: AppState) -> None:
 
     _inject_header_styles()
 
-    with st.container():
-        st.markdown("<div class='eh-hero'>", unsafe_allow_html=True)
-        hero_cols = st.columns([2.6, 1.4])
-        with hero_cols[0]:
-            st.markdown("<h1 class='eh-title'>Email Handler</h1>", unsafe_allow_html=True)
-            st.markdown(
-                "<p class='eh-tagline'>Local phishing triage workspace for analysts.</p>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                f"<span class='eh-badge'>Version {APP_VERSION} · Env `{config.env_name}`</span>",
-                unsafe_allow_html=True,
-            )
-        with hero_cols[1]:
-            if logo_path:
-                st.markdown("<div class='eh-logo-wrapper'>", unsafe_allow_html=True)
-                st.image(str(logo_path))
-                st.markdown("</div>", unsafe_allow_html=True)
-            else:
-                st.markdown("<div style='height: 140px;'></div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown(
-        """
-        **Email Handler streamlines your investigation workflow:**
-        - Ingest phishing reports from local folders with deterministic hashing.
-        - Normalize sender details, URLs, callback numbers, and attachments.
-        - Review, edit, and promote records before finalizing batches.
-        - Export evidence packages and HTML reports for downstream teams.
-        """
-    )
+    hero_cols = st.columns([2, 1], gap="large")
+    with hero_cols[0]:
+        st.markdown("<h1 class='eh-title'>Email Handler</h1>", unsafe_allow_html=True)
+        st.markdown(
+            "<p class='eh-tagline'>Local phishing triage workspace for analysts.</p>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"<span class='eh-badge'>Version {APP_VERSION} · Env `{config.env_name}`</span>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            """
+            **Email Handler streamlines your investigation workflow:**
+            - Ingest phishing reports from local folders with deterministic hashing.
+            - Normalize sender details, URLs, callback numbers, and attachments.
+            - Review, edit, and promote records before finalizing batches.
+            - Export evidence packages and HTML reports for downstream teams.
+            """
+        )
+    with hero_cols[1]:
+        if logo_path:
+            st.markdown("<div class='eh-logo-wrapper'>", unsafe_allow_html=True)
+            st.image(str(logo_path))
+            st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div style='height: 140px;'></div>", unsafe_allow_html=True)
 
     with st.expander("Key Directories", expanded=False):
         st.write(f"**Input:** `{config.input_dir}`")

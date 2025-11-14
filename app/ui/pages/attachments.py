@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 
 import pandas as pd
 import streamlit as st
@@ -58,6 +59,14 @@ def render(state: AppState) -> None:
         st.info("No attachments found for the current filters.")
         return
 
+    page_size = st.slider("Rows per page", min_value=50, max_value=500, step=50, value=200)
+    total_records = len(attachments)
+    total_pages = max(1, math.ceil(total_records / page_size))
+    current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1)
+    start = (current_page - 1) * page_size
+    end = start + page_size
+    page_records = attachments[start:end]
+
     df = pd.DataFrame(
         [
             {
@@ -69,14 +78,15 @@ def render(state: AppState) -> None:
                 "Sender": record["email_sender"],
                 "Batch": record["batch_name"] or "N/A",
             }
-            for record in attachments
+            for record in page_records
         ]
     )
+    st.caption(f"Showing {len(page_records)} of {total_records} attachments (page {current_page}/{total_pages}).")
     st.dataframe(df, use_container_width=True, hide_index=True)
 
     selected_ids = st.multiselect(
         "Select attachments to export",
-        options=[record["id"] for record in attachments],
+        options=[record["id"] for record in page_records],
         format_func=lambda attachment_id: next(
             (record["file_name"] for record in attachments if record["id"] == attachment_id),
             str(attachment_id),

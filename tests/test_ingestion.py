@@ -1,7 +1,10 @@
 from email.message import EmailMessage
 from pathlib import Path
+import json
 
-from app.db.models import InputEmail
+from sqlalchemy import func
+
+from app.db.models import InputEmail, Attachment
 from app.services.ingestion import ATTACHMENT_ROOT, ingest_emails
 
 
@@ -40,4 +43,36 @@ def test_ingestion_creates_records_and_pickle(temp_config, db_session):
     email_record = db_session.get(InputEmail, email_ids[0])
     assert email_record is not None
     assert email_record.pickle_batch_id == batch.id
+
+
+def test_ingestion_with_generated_dataset(temp_config, db_session, populated_input, generated_dataset):
+    summary_path = generated_dataset / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    expected_emails = summary.get("email_count", len(populated_input))
+
+    result = ingest_emails(
+        db_session,
+        config=temp_config,
+        source_paths=populated_input,
+        batch_name="generated_dataset",
+    )
+    assert result is not None
+    batch, email_ids = result
+    distinct_emails = len(email_ids)
+    assert distinct_emails == expected_emails
+    assert Path(batch.file_path).exists()
+
+    attachments_count = db_session.execute(
+        func.count(Attachment.id)
+    ).scalar_one()
+    assert attachments_count >= 0
+
+    sample = db_session.get(InputEmail, email_ids[0])
+    assert sample is not None
+    assert sample.subject
+    assert sample.body_html or sample.body_html is None
+
+    output_dir = temp_config.output_dir / ATTACHMENT_ROOT
+    assert output_dir.exists()
+    assert any(output_dir.rglob("*"))
 

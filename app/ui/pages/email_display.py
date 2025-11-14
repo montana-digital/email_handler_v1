@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import math
 
 import pandas as pd
 import streamlit as st
 from streamlit.components.v1 import html
+from PIL import Image, UnidentifiedImageError
 
 from app.db.init_db import session_scope
 from app.services.batch_finalization import finalize_batch
@@ -86,9 +88,56 @@ def render(state: AppState) -> None:
         or search_term in (record["email_hash"] or "").lower()
     ]
 
+    column_accessors = {
+        "Subject": lambda record: record["subject"] or "",
+        "Sender": lambda record: record["sender"] or "",
+        "Subject ID": lambda record: record["subject_id"] or "",
+        "Email Hash": lambda record: record["email_hash"] or "",
+        "URLs": lambda record: " ".join(record["urls_parsed"]),
+        "Callback Numbers": lambda record: " ".join(record["callback_numbers_parsed"]),
+    }
+
+    with st.expander("Advanced Filters", expanded=False):
+        selected_column = st.selectbox("Filter column", options=list(column_accessors.keys()))
+        include_text = st.text_input("Include records containing", key="include_filter").strip()
+        exclude_text = st.text_input("Exclude records containing", key="exclude_filter").strip()
+        sort_column = st.selectbox(
+            "Sort by",
+            options=["Subject", "Sender", "Date Sent", "Subject ID"],
+        )
+        sort_order = st.selectbox("Sort order", options=["Ascending", "Descending"])
+
+    accessor = column_accessors[selected_column]
+    if include_text:
+        include_lower = include_text.lower()
+        filtered = [
+            record for record in filtered if include_lower in accessor(record).lower()
+        ]
+    if exclude_text:
+        exclude_lower = exclude_text.lower()
+        filtered = [
+            record for record in filtered if exclude_lower not in accessor(record).lower()
+        ]
+
+    sort_key_map = {
+        "Subject": lambda record: (record["subject"] or "").lower(),
+        "Sender": lambda record: (record["sender"] or "").lower(),
+        "Date Sent": lambda record: record["date_sent"] or "",
+        "Subject ID": lambda record: (record["subject_id"] or "").lower(),
+    }
+    filtered = sorted(filtered, key=sort_key_map[sort_column], reverse=sort_order == "Descending")
+
     if not filtered:
         st.warning("No emails matched the current search criteria.")
         return
+
+    page_size = st.slider("Rows per page", min_value=25, max_value=200, step=25, value=50)
+    total_records = len(filtered)
+    total_pages = max(1, math.ceil(total_records / page_size))
+    current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1)
+    start = (current_page - 1) * page_size
+    end = start + page_size
+    page_records = filtered[start:end]
 
     table_rows = [
         {
@@ -100,10 +149,11 @@ def render(state: AppState) -> None:
             "URLs": ", ".join(record["urls_parsed"]),
             "Callback Numbers": ", ".join(record["callback_numbers_parsed"]),
         }
-        for record in filtered
+        for record in page_records
     ]
 
     st.subheader("Batch Summary")
+    st.caption(f"Showing {len(page_records)} of {total_records} results (page {current_page}/{total_pages}).")
     st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
     available_ids = [row["ID"] for row in table_rows]
@@ -242,7 +292,12 @@ def render(state: AppState) -> None:
                 st.write(f"**{file_name}** — {file_type or 'unknown'}, {file_size} bytes")
 
                 if file_path.exists() and file_type.startswith("image"):
-                    st.image(str(file_path), caption=file_name, use_container_width=True)
+                    try:
+                        with file_path.open("rb") as fh:
+                            Image.open(fh)
+                        st.image(str(file_path), caption=file_name, use_container_width=True)
+                    except UnidentifiedImageError:
+                        st.info("Preview not available for this attachment type.")
 
                 if file_path.exists():
                     with file_path.open("rb") as handle:

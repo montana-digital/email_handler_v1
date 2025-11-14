@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, List
 
 import pytest
+import shutil
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import AppConfig
 from app.db.models import Base
+from scripts import create_dataset
 
 
 @pytest.fixture()
@@ -45,4 +47,23 @@ def db_session(temp_config: AppConfig) -> Iterator[Session]:
     finally:
         session.close()
         engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def generated_dataset(tmp_path_factory) -> Path:
+    root = tmp_path_factory.mktemp("dataset")
+    create_dataset(root, email_count=80, seed=314152)
+    return root
+
+
+@pytest.fixture()
+def populated_input(temp_config: AppConfig, generated_dataset: Path) -> List[Path]:
+    source_dir = generated_dataset / "emails"
+    destination = temp_config.input_dir
+    paths: List[Path] = []
+    for email_file in source_dir.glob("*.eml"):
+        target = destination / email_file.name
+        shutil.copy2(email_file, target)
+        paths.append(target)
+    return paths
 
