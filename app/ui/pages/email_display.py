@@ -183,22 +183,56 @@ def render(state: AppState) -> None:
         generate_report = st.button("Generate HTML Report", disabled=not report_selection, use_container_width=True)
     if generate_report:
         with session_scope() as session:
-            report_path = generate_email_report(
+            artifacts = generate_email_report(
                 session,
                 report_selection,
                 config=state.config,
             )
-        if report_path and report_path.exists():
-            state.add_notification(f"Generated report {report_path.name}")
-            st.success(f"Generated report at {report_path}")
-            with report_path.open("rb") as handle:
+        if artifacts:
+            state.add_notification(f"Generated report {artifacts.html_path.name}")
+            st.success(f"Generated report at {artifacts.html_path}")
+            with artifacts.html_path.open("rb") as handle:
                 st.download_button(
-                    label="Download Report",
+                    label="Download HTML Report",
                     data=handle.read(),
-                    file_name=report_path.name,
+                    file_name=artifacts.html_path.name,
                     mime="text/html",
-                    key=f"download_report_{report_path.stem}",
+                    key=f"download_report_{artifacts.html_path.stem}",
                 )
+            with artifacts.csv_text_path.open("rb") as handle:
+                st.download_button(
+                    label="Download CSV (Text)",
+                    data=handle.read(),
+                    file_name=artifacts.csv_text_path.name,
+                    mime="text/csv",
+                    key=f"download_csv_text_{artifacts.csv_text_path.stem}",
+                )
+            with artifacts.csv_full_path.open("rb") as handle:
+                st.download_button(
+                    label="Download CSV (Full)",
+                    data=handle.read(),
+                    file_name=artifacts.csv_full_path.name,
+                    mime="text/csv",
+                    key=f"download_csv_full_{artifacts.csv_full_path.stem}",
+                )
+            if artifacts.attachments_zip_path and artifacts.attachments_zip_path.exists():
+                with artifacts.attachments_zip_path.open("rb") as handle:
+                    st.download_button(
+                        label="Download All Attachments (ZIP)",
+                        data=handle.read(),
+                        file_name=artifacts.attachments_zip_path.name,
+                        mime="application/zip",
+                        key=f"download_zip_attachments_{artifacts.attachments_zip_path.stem}",
+                    )
+            if artifacts.emails_zip_path and artifacts.emails_zip_path.exists():
+                with artifacts.emails_zip_path.open("rb") as handle:
+                    st.download_button(
+                        label="Download All Emails (ZIP)",
+                        data=handle.read(),
+                        file_name=artifacts.emails_zip_path.name,
+                        mime="application/zip",
+                        key=f"download_zip_emails_{artifacts.emails_zip_path.stem}",
+                    )
         else:
             st.error("Report generation failed or produced no output.")
 

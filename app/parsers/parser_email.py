@@ -179,10 +179,14 @@ def parse_msg_file(path: Path) -> ParsedEmail:
     message["Cc"] = msg.cc
     message["Subject"] = msg.subject
     message["Date"] = msg.date
-    message["Message-ID"] = msg.message_id
+    message["Message-ID"] = getattr(msg, "message_id", None) or getattr(msg, "messageId", None)
 
     html_body = msg.htmlBody or None
+    if isinstance(html_body, bytes):
+        html_body = html_body.decode("utf-8", errors="replace")
     text_body = msg.body or None
+    if isinstance(text_body, bytes):
+        text_body = text_body.decode("utf-8", errors="replace")
 
     urls = extract_urls(text_body or html_body or "")
     phones = extract_phone_numbers(text_body or html_body or "")

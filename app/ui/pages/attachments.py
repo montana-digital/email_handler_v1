@@ -59,13 +59,51 @@ def render(state: AppState) -> None:
         st.info("No attachments found for the current filters.")
         return
 
+    column_accessors = {
+        "File Name": lambda record: record["file_name"] or "",
+        "Category": lambda record: record["category"] or "",
+        "Subject": lambda record: record["email_subject"] or "",
+        "Sender": lambda record: record["email_sender"] or "",
+        "Batch": lambda record: record["batch_name"] or "",
+    }
+
+    with st.expander("Advanced Filters", expanded=False):
+        selected_column = st.selectbox("Filter column", options=list(column_accessors.keys()))
+        include_text = st.text_input("Include attachments containing", key="attachments_include").strip()
+        exclude_text = st.text_input("Exclude attachments containing", key="attachments_exclude").strip()
+        sort_column = st.selectbox("Sort by", options=["File Name", "Category", "Subject", "Sender", "Batch", "Size"])
+        sort_order = st.selectbox("Sort order", options=["Ascending", "Descending"])
+
+    accessor = column_accessors[selected_column]
+    filtered_records = attachments
+    if include_text:
+        include_lower = include_text.lower()
+        filtered_records = [record for record in filtered_records if include_lower in accessor(record).lower()]
+    if exclude_text:
+        exclude_lower = exclude_text.lower()
+        filtered_records = [record for record in filtered_records if exclude_lower not in accessor(record).lower()]
+
+    sort_key_map = {
+        "File Name": lambda record: (record["file_name"] or "").lower(),
+        "Category": lambda record: (record["category"] or "").lower(),
+        "Subject": lambda record: (record["email_subject"] or "").lower(),
+        "Sender": lambda record: (record["email_sender"] or "").lower(),
+        "Batch": lambda record: (record["batch_name"] or "").lower(),
+        "Size": lambda record: record["file_size"] or 0,
+    }
+    filtered_records = sorted(filtered_records, key=sort_key_map[sort_column], reverse=sort_order == "Descending")
+
+    if not filtered_records:
+        st.warning("No attachments matched the current search criteria.")
+        return
+
     page_size = st.slider("Rows per page", min_value=50, max_value=500, step=50, value=200)
-    total_records = len(attachments)
+    total_records = len(filtered_records)
     total_pages = max(1, math.ceil(total_records / page_size))
     current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1)
     start = (current_page - 1) * page_size
     end = start + page_size
-    page_records = attachments[start:end]
+    page_records = filtered_records[start:end]
 
     df = pd.DataFrame(
         [

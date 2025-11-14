@@ -22,7 +22,10 @@ def test_settings_reset_confirmation(apptest_env, monkeypatch):
     app.run()
 
     expanders = app.expander
-    reset_expander = expanders[-1]
-    assert reset_expander.label.startswith("Reset to first-run state")
+    reset_expander = next(
+        (exp for exp in expanders if exp.label.startswith("Reset to first-run state")),
+        None,
+    )
+    assert reset_expander is not None
     assert reset_expander.text_input
 

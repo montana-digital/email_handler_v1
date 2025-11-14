@@ -6,11 +6,27 @@ from pathlib import Path
 
 from app.db.models import Attachment, InputEmail
 from app.services.reporting import generate_email_report
+from app.utils import sha256_file
 
 
 def _create_email(db_session, temp_config) -> InputEmail:
+    temp_config.input_dir.mkdir(parents=True, exist_ok=True)
+    eml_path = temp_config.input_dir / "sample.eml"
+    eml_content = (
+        "From: alerts@example.com\n"
+        "To: triage@example.com\n"
+        "Subject: Report Subject\n"
+        "Date: Fri, 14 Nov 2025 10:00:00 +0000\n"
+        "Message-ID: <sample-message@local>\n"
+        "\n"
+        "Callback Number: (888) 111-1111\n"
+        "URL: https://malicious.example.com\n"
+    )
+    eml_path.write_text(eml_content, encoding="utf-8")
+    email_hash = sha256_file(eml_path)
+
     email = InputEmail(
-        email_hash="hash-report",
+        email_hash=email_hash,
         subject="Report Subject",
         sender="alerts@example.com",
         date_sent=datetime.now(timezone.utc),
@@ -43,12 +59,17 @@ def test_generate_email_report_creates_file(db_session, temp_config, tmp_path, m
 
     assert artifacts is not None
     assert artifacts.html_path.exists()
-    assert artifacts.csv_path.exists()
+    assert artifacts.csv_text_path.exists()
+    assert artifacts.csv_full_path.exists()
+    if artifacts.attachments_zip_path:
+        assert artifacts.attachments_zip_path.exists()
+    if artifacts.emails_zip_path:
+        assert artifacts.emails_zip_path.exists()
 
     content = artifacts.html_path.read_text(encoding="utf-8")
     assert "Report Subject" in content
     assert "malicious.example.com" in content
-    csv_content = artifacts.csv_path.read_text(encoding="utf-8")
+    csv_content = artifacts.csv_text_path.read_text(encoding="utf-8")
     assert "Report Subject" in csv_content
 
 
