@@ -15,8 +15,10 @@ class AppState:
     config: AppConfig
     selected_batch_id: Optional[int] = None
     selected_email_id: Optional[int] = None
+    selected_standard_email_id: Optional[int] = None
     attachments_filter: str = "Images"
     search_query: str = ""
+    standard_email_search: str = ""
     notifications: list[str] = field(default_factory=list)
     script_runs: list[dict] = field(default_factory=list)
 
