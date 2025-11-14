@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import importlib.util
 import math
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from streamlit.components.v1 import html
 from PIL import Image, UnidentifiedImageError
+from streamlit.components.v1 import html
 
 from app.db.init_db import session_scope
 from app.services.batch_finalization import finalize_batch
+from app.services.email_exports import (
+    build_attachments_zip,
+    build_single_email_html,
+    find_original_email_bytes,
+)
 from app.services.email_records import (
     get_batches,
     get_email_detail,
@@ -25,6 +30,90 @@ from app.services.standard_emails import promote_to_standard_emails
 from app.ui.state import AppState
 
 
+def _input_counts(input_dir: Path) -> tuple[int, int]:
+    if not input_dir.exists():
+        return 0, 0
+    eml_count = len(list(input_dir.glob("*.eml")))
+    msg_count = len(list(input_dir.glob("*.msg")))
+    return eml_count, msg_count
+
+
+def _render_value_list(label: str, values: list[str]) -> None:
+    if not values:
+        st.markdown(f"**{label}:** —")
+        return
+    if len(values) <= 3:
+        formatted = ", ".join(values)
+        st.markdown(f"**{label}:** {formatted}")
+    else:
+        with st.expander(f"{label} ({len(values)})", expanded=False):
+            st.write("\n".join(values))
+
+
+def _has_custom_background(body_html: str) -> bool:
+    lowered = body_html.lower()
+    tokens = ("background-color", "background:", "bgcolor", "background=")
+    return any(token in lowered for token in tokens)
+
+
+def _render_email_body(body_html: str) -> None:
+    if _has_custom_background(body_html):
+        html(body_html, height=500, scrolling=True)
+    else:
+        wrapped = f"""
+        <div style="
+            background-color: #ffffff;
+            color: #111111;
+            padding: 1rem;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+        ">
+        {body_html}
+        </div>
+        """
+        html(wrapped, height=500, scrolling=True)
+
+
+def _render_download_buttons(email_detail: dict, attachments: list[dict], config) -> None:
+    original_payload = find_original_email_bytes(config, email_detail.get("email_hash"))
+    attachments_zip = build_attachments_zip(attachments, prefix=f"email_{email_detail.get('id', 'attachments')}_files")
+    single_html = build_single_email_html(email_detail)
+
+    download_cols = st.columns(3)
+    with download_cols[0]:
+        st.download_button(
+            "Download Original",
+            data=original_payload[1] if original_payload else b"",
+            file_name=original_payload[0] if original_payload else "original_unavailable.txt",
+            mime="application/octet-stream",
+            disabled=original_payload is None,
+            use_container_width=True,
+        )
+        if original_payload is None:
+            st.caption("Original file not found.")
+
+    with download_cols[1]:
+        st.download_button(
+            "Download HTML",
+            data=single_html,
+            file_name=f"email_{email_detail.get('id', 'detail')}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+
+    with download_cols[2]:
+        st.download_button(
+            "Download Attachments",
+            data=attachments_zip[1] if attachments_zip else b"",
+            file_name=attachments_zip[0] if attachments_zip else "attachments_unavailable.zip",
+            mime="application/zip",
+            disabled=attachments_zip is None,
+            use_container_width=True,
+        )
+        if attachments_zip is None:
+            st.caption("No attachments available.")
+
+
 def render(state: AppState) -> None:
     st.header("Email Display")
     st.write("Ingest new batches, review parsed results, and edit metadata before upload.")
@@ -35,18 +124,40 @@ def render(state: AppState) -> None:
             "Install it via `pip install extract-msg` to process `.msg` files."
         )
 
+    eml_count, msg_count = _input_counts(state.config.input_dir)
+    with st.container():
+        st.caption(
+            f"Input directory `{state.config.input_dir}` currently contains **{eml_count} EML** "
+            f"and **{msg_count} MSG** files."
+        )
+
     col_ingest, col_refresh = st.columns([1, 1])
     with col_ingest:
         if st.button("Ingest New Emails", use_container_width=True):
             with session_scope() as session:
                 result = ingest_emails(session, config=state.config)
-            if result:
-                batch, email_ids = result
-                state.add_notification(f"Ingested {len(email_ids)} emails into {batch.batch_name}")
-                st.success(f"Ingested {len(email_ids)} emails into '{batch.batch_name}'.")
-                st.rerun()
-            else:
+            if result is None:
                 st.info("No new emails found in the input directory.")
+            else:
+                if result.skipped:
+                    skipped_preview = "\n".join(result.skipped[:5])
+                    more = ""
+                    if len(result.skipped) > 5:
+                        more = f"\n...and {len(result.skipped) - 5} more."
+                    st.warning(
+                        "Some files could not be ingested:\n"
+                        f"{skipped_preview}{more}\n"
+                        "Check that optional dependencies (e.g., `extract-msg`) are installed and that the files are valid."
+                    )
+
+                if result.batch and result.email_ids:
+                    batch = result.batch
+                    email_ids = result.email_ids
+                    state.add_notification(f"Ingested {len(email_ids)} emails into {batch.batch_name}")
+                    st.success(f"Ingested {len(email_ids)} emails into '{batch.batch_name}'.")
+                    st.rerun()
+                elif not result.email_ids and not result.batch:
+                    st.info("No new emails were saved. See warnings above for skipped files.")
     with col_refresh:
         if st.button("Refresh Batches", use_container_width=True):
             st.rerun()
@@ -318,69 +429,75 @@ def render(state: AppState) -> None:
         return
 
     st.subheader("Email Details")
+    with st.container(border=True):
+        st.markdown("#### Metadata")
+        metadata = [
+            ("Subject", email_detail.get("subject") or "—"),
+            ("Subject ID", email_detail.get("subject_id") or "—"),
+            ("Sender", email_detail.get("sender") or "—"),
+            ("Date Sent", email_detail.get("date_sent") or "—"),
+            ("Date Reported", email_detail.get("date_reported") or "—"),
+            ("Sending Source", email_detail.get("sending_source_raw") or "—"),
+            ("Additional Contacts", email_detail.get("additional_contacts") or "—"),
+            ("Model Confidence", email_detail.get("model_confidence") if email_detail.get("model_confidence") is not None else "—"),
+            ("Message ID", email_detail.get("message_id") or "—"),
+        ]
 
-    metadata = [
-        ("Subject", email_detail.get("subject") or "—"),
-        ("Subject ID", email_detail.get("subject_id") or "—"),
-        ("Sender", email_detail.get("sender") or "—"),
-        ("Date Sent", email_detail.get("date_sent") or "—"),
-        ("Date Reported", email_detail.get("date_reported") or "—"),
-        ("Sending Source", email_detail.get("sending_source_raw") or "—"),
-        ("Parsed URLs", ", ".join(email_detail.get("urls_parsed", [])) or "—"),
-        ("Callback Numbers", ", ".join(email_detail.get("callback_numbers_parsed", [])) or "—"),
-        ("Additional Contacts", email_detail.get("additional_contacts") or "—"),
-        ("Model Confidence", email_detail.get("model_confidence") if email_detail.get("model_confidence") is not None else "—"),
-        ("Message ID", email_detail.get("message_id") or "—"),
-    ]
+        col_a, col_b = st.columns(2)
+        for index, (label, value) in enumerate(metadata):
+            value_str = value if isinstance(value, str) else str(value)
+            target_col = col_a if index % 2 == 0 else col_b
+            target_col.markdown(f"**{label}**")
+            target_col.code(value_str or "—", language="text")
 
-    st.markdown("### Metadata")
-    col_a, col_b = st.columns(2)
-    for index, (label, value) in enumerate(metadata):
-        target_col = col_a if index % 2 == 0 else col_b
-        target_col.markdown(f"**{label}:** {value}")
+        url_list = email_detail.get("urls_parsed", []) or []
+        callback_list = email_detail.get("callback_numbers_parsed", []) or []
 
-    attachments = email_detail.get("attachments") or []
-    with st.expander("HTML Preview & Attachments", expanded=False):
-        if email_detail.get("body_html"):
-            st.markdown("#### HTML Preview")
-            body_html = email_detail["body_html"]
-            lowered = body_html.lower()
-            if "<html" in lowered or "<body" in lowered:
-                html(body_html, height=500, scrolling=True)
+        _render_value_list("Parsed URLs", url_list)
+        _render_value_list("Callback Numbers", callback_list)
+
+        attachments = email_detail.get("attachments") or []
+        _render_download_buttons(email_detail, attachments, state.config)
+
+        with st.expander("HTML Preview & Attachments", expanded=False):
+            if email_detail.get("body_html"):
+                st.markdown("#### HTML Preview")
+                _render_email_body(email_detail["body_html"])
+            elif email_detail.get("body_text"):
+                st.markdown("#### Plain Text Preview")
+                st.code(email_detail["body_text"])
+
+            if attachments:
+                st.markdown("#### Attachments")
+                for attachment in attachments:
+                    file_path = Path(attachment.get("storage_path") or "")
+                    file_name = attachment.get("file_name") or "attachment"
+                    file_type = (attachment.get("file_type") or "").lower()
+                    file_size = attachment.get("file_size") or 0
+
+                    st.write(f"**{file_name}** — {file_type or 'unknown'}, {file_size} bytes")
+
+                    if file_path.exists() and file_type.startswith("image"):
+                        try:
+                            with file_path.open("rb") as fh:
+                                Image.open(fh)
+                            st.image(str(file_path), caption=file_name, use_container_width=True)
+                        except UnidentifiedImageError:
+                            st.info("Preview not available for this attachment type.")
+
+                    if file_path.exists():
+                        with file_path.open("rb") as handle:
+                            st.download_button(
+                                label=f"Download {file_name}",
+                                data=handle.read(),
+                                file_name=file_name,
+                                mime=file_type or "application/octet-stream",
+                                key=f"download_attachment_{attachment['id']}",
+                            )
+                    else:
+                        st.info("Attachment file not found on disk; regenerate or re-ingest to restore.")
             else:
-                st.markdown(body_html, unsafe_allow_html=True)
-
-        if attachments:
-            st.markdown("#### Attachments")
-            for attachment in attachments:
-                file_path = Path(attachment.get("storage_path") or "")
-                file_name = attachment.get("file_name") or "attachment"
-                file_type = (attachment.get("file_type") or "").lower()
-                file_size = attachment.get("file_size") or 0
-
-                st.write(f"**{file_name}** — {file_type or 'unknown'}, {file_size} bytes")
-
-                if file_path.exists() and file_type.startswith("image"):
-                    try:
-                        with file_path.open("rb") as fh:
-                            Image.open(fh)
-                        st.image(str(file_path), caption=file_name, use_container_width=True)
-                    except UnidentifiedImageError:
-                        st.info("Preview not available for this attachment type.")
-
-                if file_path.exists():
-                    with file_path.open("rb") as handle:
-                        st.download_button(
-                            label=f"Download {file_name}",
-                            data=handle.read(),
-                            file_name=file_name,
-                            mime=file_type or "application/octet-stream",
-                            key=f"download_attachment_{attachment['id']}",
-                        )
-                else:
-                    st.info("Attachment file not found on disk; regenerate or re-ingest to restore.")
-        else:
-            st.info("No attachments associated with this email.")
+                st.info("No attachments associated with this email.")
 
     with st.expander("Edit Email Metadata", expanded=False):
         with st.form("email_detail_form", clear_on_submit=False):
