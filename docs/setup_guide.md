@@ -11,17 +11,22 @@ This guide targets analysts running the Email Handler app on Windows with PowerS
 ```powershell
 cd C:\Users\<username>\OneDrive\Desktop\email_handler_v1
 python scripts\setup_env.py
+# optional test toolchain
+python scripts\setup_env.py --include-tests
 ```
 
 The script will:
-1. Create a virtual environment in `.venv`.
-2. Generate `requirements.txt` (if missing) and install dependencies such as Streamlit, SQLAlchemy, and parser helpers.
-3. Create the required directory structure:
+1. Validate that the bootstrap interpreter is Python 3.11+.
+2. Create (or reuse) a virtual environment in `.venv`.
+3. Install runtime dependencies from `requirements.txt` (Streamlit, SQLAlchemy, BeautifulSoup, Pillow, etc.).
+4. When `--include-tests` is supplied, install the optional QA stack from `requirements-test.txt` (pytest, Playwright, Faker, coverage plugins).
+5. Create the required directory structure:
    - `data\input` – drop downloaded `.eml` / `.msg` files here.
    - `data\cache` – interim Pickle batches.
    - `data\output` – reports, extracted attachments, and archives.
    - `data\logs` – application and parser logs.
    - `data\scripts` – approved PowerShell utilities for downloading emails.
+6. Copy `env.example` to `.env` (if `.env` does not already exist) so directory overrides persist between sessions.
 
 You can safely re-run the script; it is idempotent.
 
@@ -70,6 +75,7 @@ The launcher calls `streamlit run Home.py`, which is the root page of the multip
 
 ## 7. Troubleshooting
 - **Missing Streamlit executable**: re-run `python scripts\setup_env.py`.
+- **Feature disabled warning**: the UI now surfaces dependency-specific warnings (for example, missing `extract-msg` disables `.msg` ingestion). Install the suggested package and restart the app.
 - **Port already in use**: specify an alternate port (`python scripts\run_app.py -- --server.port 8502`).
 - **Execution policy blocks scripts**: launch PowerShell with `-ExecutionPolicy Bypass` for the session or sign scripts per organizational policy.
 - **Database locked**: ensure only one Streamlit session runs at a time or restart the app to release SQLite locks.

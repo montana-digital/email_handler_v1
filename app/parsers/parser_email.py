@@ -12,8 +12,12 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
-import extract_msg
 from bs4 import BeautifulSoup
+
+try:
+    import extract_msg
+except ImportError:  # pragma: no cover - optional dependency
+    extract_msg = None  # type: ignore[assignment]
 
 from app.parsers.models import ParsedAttachment, ParsedEmail, ParsedStandardEmail
 from app.parsers.parser_phones import extract_phone_numbers
@@ -172,6 +176,11 @@ def parse_eml_bytes(data: bytes) -> ParsedEmail:
 
 
 def parse_msg_file(path: Path) -> ParsedEmail:
+    if extract_msg is None:
+        raise RuntimeError(
+            "MSG parsing is unavailable because the optional 'extract-msg' dependency is not installed."
+        )
+
     msg = extract_msg.Message(str(path))
     message = EmailMessage()
     message["From"] = msg.sender or msg.sender_email

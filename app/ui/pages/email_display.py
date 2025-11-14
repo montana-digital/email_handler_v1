@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
 import math
 
 import pandas as pd
@@ -27,6 +28,12 @@ from app.ui.state import AppState
 def render(state: AppState) -> None:
     st.header("Email Display")
     st.write("Ingest new batches, review parsed results, and edit metadata before upload.")
+
+    if importlib.util.find_spec("extract_msg") is None:
+        st.warning(
+            "MSG ingestion is disabled because the optional `extract-msg` package is missing. "
+            "Install it via `pip install extract-msg` to process `.msg` files."
+        )
 
     col_ingest, col_refresh = st.columns([1, 1])
     with col_ingest:
@@ -158,6 +165,9 @@ def render(state: AppState) -> None:
 
     available_ids = [row["ID"] for row in table_rows]
 
+    if "report_artifacts" not in st.session_state:
+        st.session_state["report_artifacts"] = None
+
     report_selection = st.multiselect(
         "Emails to include in HTML report",
         options=available_ids,
@@ -190,51 +200,76 @@ def render(state: AppState) -> None:
             )
         if artifacts:
             state.add_notification(f"Generated report {artifacts.html_path.name}")
-            st.success(f"Generated report at {artifacts.html_path}")
-            with artifacts.html_path.open("rb") as handle:
-                st.download_button(
-                    label="Download HTML Report",
-                    data=handle.read(),
-                    file_name=artifacts.html_path.name,
-                    mime="text/html",
-                    key=f"download_report_{artifacts.html_path.stem}",
-                )
-            with artifacts.csv_text_path.open("rb") as handle:
-                st.download_button(
-                    label="Download CSV (Text)",
-                    data=handle.read(),
-                    file_name=artifacts.csv_text_path.name,
-                    mime="text/csv",
-                    key=f"download_csv_text_{artifacts.csv_text_path.stem}",
-                )
-            with artifacts.csv_full_path.open("rb") as handle:
-                st.download_button(
-                    label="Download CSV (Full)",
-                    data=handle.read(),
-                    file_name=artifacts.csv_full_path.name,
-                    mime="text/csv",
-                    key=f"download_csv_full_{artifacts.csv_full_path.stem}",
-                )
-            if artifacts.attachments_zip_path and artifacts.attachments_zip_path.exists():
-                with artifacts.attachments_zip_path.open("rb") as handle:
-                    st.download_button(
-                        label="Download All Attachments (ZIP)",
-                        data=handle.read(),
-                        file_name=artifacts.attachments_zip_path.name,
-                        mime="application/zip",
-                        key=f"download_zip_attachments_{artifacts.attachments_zip_path.stem}",
-                    )
-            if artifacts.emails_zip_path and artifacts.emails_zip_path.exists():
-                with artifacts.emails_zip_path.open("rb") as handle:
-                    st.download_button(
-                        label="Download All Emails (ZIP)",
-                        data=handle.read(),
-                        file_name=artifacts.emails_zip_path.name,
-                        mime="application/zip",
-                        key=f"download_zip_emails_{artifacts.emails_zip_path.stem}",
-                    )
+            st.session_state["report_artifacts"] = {
+                "html": str(artifacts.html_path),
+                "csv_text": str(artifacts.csv_text_path),
+                "csv_full": str(artifacts.csv_full_path),
+                "attachments_zip": str(artifacts.attachments_zip_path) if artifacts.attachments_zip_path else "",
+                "emails_zip": str(artifacts.emails_zip_path) if artifacts.emails_zip_path else "",
+            }
         else:
             st.error("Report generation failed or produced no output.")
+
+    artefacts_state = st.session_state.get("report_artifacts") or None
+    if artefacts_state:
+        st.info("Latest report artefacts available below.")
+        artifact_cols = st.columns(2)
+        html_path = Path(artefacts_state["html"])
+        csv_text_path = Path(artefacts_state["csv_text"])
+        csv_full_path = Path(artefacts_state["csv_full"])
+        with artifact_cols[0]:
+            if html_path.exists():
+                with html_path.open("rb") as handle:
+                    st.download_button(
+                        label="Download HTML Report",
+                        data=handle.read(),
+                        file_name=html_path.name,
+                        mime="text/html",
+                        key=f"download_report_{html_path.stem}",
+                    )
+            if csv_text_path.exists():
+                with csv_text_path.open("rb") as handle:
+                    st.download_button(
+                        label="Download CSV (Text)",
+                        data=handle.read(),
+                        file_name=csv_text_path.name,
+                        mime="text/csv",
+                        key=f"download_csv_text_{csv_text_path.stem}",
+                    )
+        with artifact_cols[1]:
+            if csv_full_path.exists():
+                with csv_full_path.open("rb") as handle:
+                    st.download_button(
+                        label="Download CSV (Full)",
+                        data=handle.read(),
+                        file_name=csv_full_path.name,
+                        mime="text/csv",
+                        key=f"download_csv_full_{csv_full_path.stem}",
+                    )
+            attachments_path = artefacts_state.get("attachments_zip")
+            if attachments_path:
+                path_obj = Path(attachments_path)
+                if path_obj.exists():
+                    with path_obj.open("rb") as handle:
+                        st.download_button(
+                            label="Download All Attachments (ZIP)",
+                            data=handle.read(),
+                            file_name=path_obj.name,
+                            mime="application/zip",
+                            key=f"download_zip_attachments_{path_obj.stem}",
+                        )
+            emails_zip = artefacts_state.get("emails_zip")
+            if emails_zip:
+                path_obj = Path(emails_zip)
+                if path_obj.exists():
+                    with path_obj.open("rb") as handle:
+                        st.download_button(
+                            label="Download All Emails (ZIP)",
+                            data=handle.read(),
+                            file_name=path_obj.name,
+                            mime="application/zip",
+                            key=f"download_zip_emails_{path_obj.stem}",
+                        )
 
     promotion_selection = st.multiselect(
         "Emails to promote to Standard Emails",

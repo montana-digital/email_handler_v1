@@ -1,10 +1,4 @@
-"""
-Launch the Streamlit Email Handler app.
-
-Usage (PowerShell):
-    python scripts/run_app.py
-    python scripts/run_app.py --setup-if-missing
-"""
+"""Launch the Streamlit Email Handler app using the managed virtual environment."""
 
 from __future__ import annotations
 
@@ -18,39 +12,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 VENV_DIR = PROJECT_ROOT / ".venv"
 APP_ENTRY = PROJECT_ROOT / "Home.py"
-
-
-def get_streamlit_executable() -> Path:
-    scripts_dir = VENV_DIR / ("Scripts" if platform.system() == "Windows" else "bin")
-    executable = scripts_dir / ("streamlit.exe" if platform.system() == "Windows" else "streamlit")
-    return executable
-
-
-def ensure_environment(args: argparse.Namespace) -> None:
-    if VENV_DIR.exists() and get_streamlit_executable().exists():
-        return
-
-    if not args.setup_if_missing:
-        raise SystemExit(
-            "Virtual environment or Streamlit executable not found. "
-            "Run `python scripts/setup_env.py` or rerun with --setup-if-missing."
-        )
-
-    subprocess.check_call([sys.executable, str(PROJECT_ROOT / "scripts" / "setup_env.py")])
-
-
-def launch_streamlit(extra_args: list[str]) -> None:
-    extra_args = [arg for arg in extra_args if arg != "--"]
-    streamlit_exe = get_streamlit_executable()
-    if not streamlit_exe.exists():
-        raise SystemExit("Streamlit executable not found in virtual environment.")
-
-    env = os.environ.copy()
-    env.setdefault("PYTHONPATH", str(PROJECT_ROOT))
-
-    command = [str(streamlit_exe), "run", str(APP_ENTRY), "--server.headless", "true", *extra_args]
-    print(f"[run-app] Executing: {' '.join(command)}")
-    subprocess.check_call(command, env=env)
+SETUP_SCRIPT = PROJECT_ROOT / "scripts" / "setup_env.py"
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,14 +25,70 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "streamlit_args",
         nargs=argparse.REMAINDER,
-        help="Additional arguments passed directly to `streamlit run`.",
+        help="Arguments forwarded to `streamlit run` (prefix with `--`).",
     )
     return parser.parse_args()
+
+
+def venv_python() -> Path:
+    scripts_dir = VENV_DIR / ("Scripts" if platform.system() == "Windows" else "bin")
+    python_name = "python.exe" if platform.system() == "Windows" else "python"
+    python_path = scripts_dir / python_name
+    if not python_path.exists():
+        raise SystemExit("[run-app] Virtual environment is missing. Run `python scripts/setup_env.py` first.")
+    return python_path
+
+
+def ensure_environment(args: argparse.Namespace) -> None:
+    if VENV_DIR.exists():
+        return
+    if not args.setup_if_missing:
+        raise SystemExit(
+            "[run-app] Virtual environment not found. "
+            "Run `python scripts/setup_env.py` or re-run with --setup-if-missing."
+        )
+    print("[run-app] Virtual environment missing; running setup_env.py ...")
+    subprocess.check_call([sys.executable, str(SETUP_SCRIPT)])
+
+
+def verify_streamlit_available() -> None:
+    python_bin = venv_python()
+    try:
+        subprocess.check_call(
+            [str(python_bin), "-c", "import streamlit"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            "[run-app] Streamlit is not installed in the virtual environment. "
+            "Run `python scripts/setup_env.py`."
+        ) from exc
+
+
+def launch_streamlit(extra_args: list[str]) -> None:
+    python_bin = venv_python()
+    passthrough = [arg for arg in extra_args if arg != "--"]
+
+    env = os.environ.copy()
+    env.setdefault("PYTHONPATH", str(PROJECT_ROOT))
+
+    command = [
+        str(python_bin),
+        "-m",
+        "streamlit",
+        "run",
+        str(APP_ENTRY),
+        "--server.headless",
+        "true",
+        *passthrough,
+    ]
+    print(f"[run-app] Executing: {' '.join(command)}")
+    subprocess.check_call(command, env=env)
 
 
 def main() -> None:
     args = parse_args()
     ensure_environment(args)
+    verify_streamlit_available()
     launch_streamlit(args.streamlit_args)
 
 
