@@ -27,12 +27,84 @@ RUNTIME_DIRECTORIES = [
 ]
 
 
+def discover_python_interpreters() -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(path: Path) -> None:
+        if path.exists():
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                candidates.append(resolved)
+
+    _add(Path(sys.executable))
+
+    path_env = os.environ.get("PATH", "")
+    for entry in path_env.split(os.pathsep):
+        bin_path = Path(entry)
+        python_names = ["python.exe", "python3.exe", "py.exe"] if platform.system() == "Windows" else ["python3", "python"]
+        for name in python_names:
+            _add(bin_path / name)
+
+    # Add Windows Store python launcher if available
+    if platform.system() == "Windows":
+        py_launcher = shutil.which("py")
+        if py_launcher:
+            versions = ["3.11", "3.12", "3.10"]
+            for version in versions:
+                try:
+                    result = subprocess.check_output([py_launcher, f"-{version}", "-c", "import sys; print(sys.executable)"])
+                    interpreter = Path(result.decode("utf-8").strip())
+                    _add(interpreter)
+                except Exception:
+                    continue
+
+    # Deduplicate while preserving order
+    unique_candidates = []
+    seen = set()
+    for interpreter in candidates:
+        if interpreter not in seen:
+            seen.add(interpreter)
+            unique_candidates.append(interpreter)
+    return unique_candidates
+
+
+def select_python_interpreter(cli_override: Path | None) -> Path:
+    if cli_override:
+        return cli_override
+
+    interpreters = discover_python_interpreters()
+    if not interpreters:
+        raise SystemExit("[setup] No Python interpreters were found on this system.")
+
+    if len(interpreters) == 1:
+        selected = interpreters[0]
+        print(f"[setup] Using detected interpreter: {selected}")
+        return selected
+
+    print("[setup] Multiple Python interpreters detected. Select one:")
+    for idx, interpreter in enumerate(interpreters, start=1):
+        print(f"  {idx}. {interpreter}")
+
+    while True:
+        choice = input("Enter the number of the interpreter to use: ").strip()
+        if not choice.isdigit():
+            print("Please enter a number from the list.")
+            continue
+        index = int(choice)
+        if 1 <= index <= len(interpreters):
+            selected = interpreters[index - 1]
+            print(f"[setup] Selected interpreter: {selected}")
+            return selected
+        print("Invalid selection. Try again.")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create the local Email Handler environment.")
     parser.add_argument(
         "--python",
         type=Path,
-        default=Path(sys.executable),
         help="Python interpreter that should be used to create the virtual environment.",
     )
     parser.add_argument(
@@ -54,10 +126,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def verify_platform() -> None:
+    if platform.system() != "Windows":
+        raise SystemExit("[setup] This automation currently supports Windows environments only.")
+
+
 def check_python_version(python_exec: Path) -> None:
-    if sys.version_info < (3, 11):
+    version_output = subprocess.check_output([str(python_exec), "-c", "import sys; print(sys.version)"]).decode("utf-8").strip()
+    major_minor = subprocess.check_output([str(python_exec), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"]).decode(
+        "utf-8"
+    ).strip()
+    major, minor = map(int, major_minor.split("."))
+    if (major, minor) < (3, 11):
         raise SystemExit("[setup] Python 3.11 or later is required to run this script.")
-    print(f"[setup] Using bootstrap interpreter: {python_exec} (Python {platform.python_version()})")
+    print(f"[setup] Using bootstrap interpreter: {python_exec} (Python {version_output})")
 
 
 def ensure_runtime_directories() -> None:
@@ -108,25 +190,25 @@ def create_virtual_env(venv_path: Path, python_exec: Path) -> None:
     print(f"[setup] Created virtual environment at {venv_path}")
 
 
-def pip_path(venv_path: Path) -> Path:
+def venv_python_path(venv_path: Path) -> Path:
     scripts_dir = venv_path / ("Scripts" if platform.system() == "Windows" else "bin")
-    pip_name = "pip.exe" if platform.system() == "Windows" else "pip"
-    pip_executable = scripts_dir / pip_name
-    if not pip_executable.exists():
-        raise SystemExit(f"[setup] Could not find pip executable at {pip_executable}.")
-    return pip_executable
+    python_name = "python.exe" if platform.system() == "Windows" else "python"
+    python_executable = scripts_dir / python_name
+    if not python_executable.exists():
+        raise SystemExit(f"[setup] Could not find python executable at {python_executable}.")
+    return python_executable
 
 
-def install_requirements(pip_executable: Path, requirements: Path, *, label: str, optional: bool = False) -> None:
+def install_requirements(venv_python: Path, requirements: Path, *, label: str, optional: bool = False) -> None:
     if not requirements.exists():
         if optional:
             print(f"[setup] Skipping {label} install; {requirements.name} not found.")
             return
         raise SystemExit(f"[setup] Required file {requirements} is missing.")
 
-    run_command([str(pip_executable), "install", "--upgrade", "pip"])
+    run_command([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"])
     try:
-        run_command([str(pip_executable), "install", "-r", str(requirements)])
+        run_command([str(venv_python), "-m", "pip", "install", "-r", str(requirements)])
     except SystemExit:
         if optional:
             print(f"[setup] Failed to install optional {label} dependencies. Continue without them.")
@@ -135,20 +217,22 @@ def install_requirements(pip_executable: Path, requirements: Path, *, label: str
 
 
 def main() -> None:
+    verify_platform()
     args = parse_args()
-    check_python_version(args.python)
+    python_exec = select_python_interpreter(args.python)
+    check_python_version(python_exec)
     ensure_runtime_directories()
     ensure_env_file()
-    create_virtual_env(args.venv_dir, args.python)
+    create_virtual_env(args.venv_dir, python_exec)
 
     if args.skip_install:
         print("[setup] Skipping dependency installation (--skip-install).")
         return
 
-    pip_executable = pip_path(args.venv_dir)
-    install_requirements(pip_executable, CORE_REQUIREMENTS, label="core runtime")
+    venv_python = venv_python_path(args.venv_dir)
+    install_requirements(venv_python, CORE_REQUIREMENTS, label="core runtime")
     if args.include_tests:
-        install_requirements(pip_executable, TEST_REQUIREMENTS, label="test", optional=True)
+        install_requirements(venv_python, TEST_REQUIREMENTS, label="test", optional=True)
 
     activate_hint = (
         f"{args.venv_dir}\\Scripts\\Activate.ps1"

@@ -13,6 +13,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 VENV_DIR = PROJECT_ROOT / ".venv"
 APP_ENTRY = PROJECT_ROOT / "Home.py"
 SETUP_SCRIPT = PROJECT_ROOT / "scripts" / "setup_env.py"
+ENV_FILE = PROJECT_ROOT / ".env"
+ENV_TEMPLATE_CANDIDATES = [PROJECT_ROOT / ".env.example", PROJECT_ROOT / "env.example"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +30,37 @@ def parse_args() -> argparse.Namespace:
         help="Arguments forwarded to `streamlit run` (prefix with `--`).",
     )
     return parser.parse_args()
+
+
+def verify_platform() -> None:
+    if platform.system() != "Windows":
+        raise SystemExit("[run-app] This launcher currently supports Windows environments only.")
+
+
+def ensure_env_file() -> None:
+    if ENV_FILE.exists():
+        return
+    for candidate in ENV_TEMPLATE_CANDIDATES:
+        if candidate.exists():
+            ENV_FILE.write_text(candidate.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"[run-app] Created .env from template {candidate.name}.")
+            return
+    ENV_FILE.write_text(
+        "\n".join(
+            [
+                "EMAIL_HANDLER_DATABASE_URL=sqlite:///data/email_handler.db",
+                "EMAIL_HANDLER_INPUT_DIR=data/input",
+                "EMAIL_HANDLER_OUTPUT_DIR=data/output",
+                "EMAIL_HANDLER_CACHE_DIR=data/cache",
+                "EMAIL_HANDLER_SCRIPTS_DIR=data/scripts",
+                "EMAIL_HANDLER_LOG_DIR=data/logs",
+                "EMAIL_HANDLER_ENV=local",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print("[run-app] Created default .env configuration.")
 
 
 def venv_python() -> Path:
@@ -86,8 +119,10 @@ def launch_streamlit(extra_args: list[str]) -> None:
 
 
 def main() -> None:
+    verify_platform()
     args = parse_args()
     ensure_environment(args)
+    ensure_env_file()
     verify_streamlit_available()
     launch_streamlit(args.streamlit_args)
 
