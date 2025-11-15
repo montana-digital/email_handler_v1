@@ -28,6 +28,8 @@ def upsert_input_email(session: Session, email: InputEmail) -> InputEmail:
     existing = find_input_email_by_hash(session, email.email_hash)
     if existing:
         for attr in (
+            "parse_status",
+            "parse_error",
             "subject_id",
             "sender",
             "cc",

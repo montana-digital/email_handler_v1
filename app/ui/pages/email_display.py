@@ -25,6 +25,8 @@ from app.services.email_records import (
     update_email_record,
 )
 from app.services.ingestion import ingest_emails
+from app.services.parsing import parser_capabilities
+from app.services.reparse import reparse_email
 from app.services.reporting import generate_email_report
 from app.services.standard_emails import promote_to_standard_emails
 from app.ui.state import AppState
@@ -75,8 +77,14 @@ def _render_email_body(body_html: str) -> None:
 
 
 def _render_download_buttons(email_detail: dict, attachments: list[dict], config) -> None:
-    original_payload = find_original_email_bytes(config, email_detail.get("email_hash"))
-    attachments_zip = build_attachments_zip(attachments, prefix=f"email_{email_detail.get('id', 'attachments')}_files")
+    with session_scope() as session:
+        original_payload = find_original_email_bytes(session, config, email_detail.get("email_hash"))
+        attachments_zip = build_attachments_zip(
+            attachments,
+            prefix=f"email_{email_detail.get('id', 'attachments')}_files",
+            session=session,
+            email_hash=email_detail.get("email_hash"),
+        )
     single_html = build_single_email_html(email_detail)
 
     download_cols = st.columns(3)
@@ -124,6 +132,16 @@ def render(state: AppState) -> None:
             "Install it via `pip install extract-msg` to process `.msg` files."
         )
 
+    with st.expander("Parser Diagnostics", expanded=False):
+        caps = parser_capabilities()
+        for name, info in caps.items():
+            status = info.get("available")
+            description = info.get("description", "")
+            if status:
+                st.success(f"{name}: available — {description}")
+            else:
+                st.warning(f"{name}: missing — {description}")
+
     eml_count, msg_count = _input_counts(state.config.input_dir)
     with st.container():
         st.caption(
@@ -148,6 +166,16 @@ def render(state: AppState) -> None:
                         "Some files could not be ingested:\n"
                         f"{skipped_preview}{more}\n"
                         "Check that optional dependencies (e.g., `extract-msg`) are installed and that the files are valid."
+                    )
+                if result.failures:
+                    failure_preview = "\n".join(result.failures[:5])
+                    more_failures = ""
+                    if len(result.failures) > 5:
+                        more_failures = f"\n...and {len(result.failures) - 5} more."
+                    st.warning(
+                        "Some emails were stored but could not be fully parsed yet:\n"
+                        f"{failure_preview}{more_failures}\n"
+                        "You can retry parsing them after installing optional parsers."
                     )
 
                 if result.batch and result.email_ids:
@@ -260,6 +288,7 @@ def render(state: AppState) -> None:
     table_rows = [
         {
             "ID": record["id"],
+            "Status": record.get("parse_status") or "unknown",
             "Subject": record["subject"],
             "Sender": record["sender"],
             "Date Sent": record["date_sent"],
@@ -431,6 +460,26 @@ def render(state: AppState) -> None:
     st.subheader("Email Details")
     with st.container(border=True):
         st.markdown("#### Metadata")
+        parse_status = email_detail.get("parse_status") or "unknown"
+        st.markdown(f"**Parse Status:** `{parse_status}`")
+        if email_detail.get("parse_error"):
+            st.error(f"Parser error: {email_detail['parse_error']}")
+        if st.button(
+            "Retry Parsing",
+            disabled=parse_status == "success",
+            key="retry_parse_button",
+            use_container_width=False,
+        ):
+            with session_scope() as session:
+                reparse_result = reparse_email(session, state.selected_email_id)
+            if reparse_result and reparse_result.success:
+                st.success("Parsing succeeded. Refreshing view…")
+                st.rerun()
+            elif reparse_result:
+                st.warning(f"Parsing still failing: {reparse_result.message}")
+            else:
+                st.error("Unable to reparse this email (it may have been deleted).")
+
         metadata = [
             ("Subject", email_detail.get("subject") or "—"),
             ("Subject ID", email_detail.get("subject_id") or "—"),

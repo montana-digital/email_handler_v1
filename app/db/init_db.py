@@ -5,9 +5,10 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import inspect
 
 from app.config import AppConfig, load_config
 
@@ -72,6 +73,37 @@ def init_db(*, engine: Optional[Engine] = None, config: Optional[AppConfig] = No
         engine = get_engine(config=cfg)
 
     Base.metadata.create_all(bind=engine)
+    _apply_schema_patches(engine)
+
+
+def _apply_schema_patches(engine: Engine) -> None:
+    inspector = inspect(engine)
+
+    def _has_column(table: str, column: str) -> bool:
+        return any(col["name"] == column for col in inspector.get_columns(table))
+
+    patches = [
+        (
+            "input_emails",
+            "parse_status",
+            "ALTER TABLE input_emails ADD COLUMN parse_status VARCHAR(32) DEFAULT 'success'",
+        ),
+        (
+            "input_emails",
+            "parse_error",
+            "ALTER TABLE input_emails ADD COLUMN parse_error TEXT",
+        ),
+        (
+            "parser_runs",
+            "error_message",
+            "ALTER TABLE parser_runs ADD COLUMN error_message TEXT",
+        ),
+    ]
+
+    with engine.begin() as connection:
+        for table, column, ddl in patches:
+            if not _has_column(table, column):
+                connection.execute(text(ddl))
 
 
 @contextmanager

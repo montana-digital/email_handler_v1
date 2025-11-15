@@ -1,6 +1,7 @@
 beautifulsoup4>=4.12.0
 extract-msg>=0.48.4
 loguru>=0.7.2
+mail-parser>=1.15.0
 pandas>=2.1.0
 phonenumbers>=8.13.41
 pillow>=10.1.0

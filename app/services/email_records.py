@@ -34,6 +34,8 @@ def _serialize_email(email: InputEmail) -> Dict:
     return {
         "id": email.id,
         "email_hash": email.email_hash,
+        "parse_status": email.parse_status,
+        "parse_error": email.parse_error,
         "subject": email.subject,
         "subject_id": email.subject_id,
         "sender": email.sender,

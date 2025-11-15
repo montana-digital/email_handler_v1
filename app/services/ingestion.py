@@ -8,20 +8,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
+from dataclasses import dataclass
 from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.config import AppConfig, load_config
-from app.db.models import Attachment, InputEmail, ParserRun, PickleBatch
+from app.db.models import Attachment, InputEmail, OriginalAttachment, OriginalEmail, ParserRun, PickleBatch
 from app.db.repositories import find_input_email_by_hash, register_pickle_batch, upsert_input_email
-from app.parsers import ParsedAttachment, parse_email_file
-from app.utils import sha256_file
+from app.parsers import ParsedAttachment
+from app.services.parsing import detect_candidate, run_parsing_pipeline
+from app.utils import sha256_digest
 
 ATTACHMENT_ROOT = "attachments"
 
 
-class IngestionResult(Tuple[PickleBatch, List[int]]):
-    """Tuple representing (PickleBatch, list of InputEmail IDs)."""
+@dataclass(slots=True)
+class IngestionResult:
+    batch: PickleBatch | None
+    email_ids: List[int]
+    skipped: List[str]
+    failures: List[str]
 
 
 def _ensure_directories(config: AppConfig) -> None:
@@ -46,35 +52,47 @@ def _save_attachment(config: AppConfig, email_hash: str, attachment: ParsedAttac
     return destination
 
 
-def _record_parser_run(email: InputEmail, parser_name: str, version: str = "1.0.0") -> ParserRun:
-    return ParserRun(
-        input_email=email,
-        parser_name=parser_name,
-        version=version,
-        status="success",
-    )
-
-
 def _input_email_from_parsed(email_hash: str, parsed) -> InputEmail:
+    email = InputEmail(email_hash=email_hash)
+    _apply_parsed_email(email, parsed)
+    return email
+
+
+def _apply_parsed_email(target: InputEmail, parsed) -> None:
+    target.parse_status = "success"
+    target.parse_error = None
+    target.subject_id = parsed.subject_id
+    target.sender = parsed.sender
+    target.cc = json.dumps(parsed.cc)
+    target.subject = parsed.subject
+    target.date_sent = parsed.date_sent
+    target.date_reported = parsed.date_reported
+    target.sending_source_raw = parsed.sending_source_raw
+    target.sending_source_parsed = json.dumps(parsed.sending_source_parsed)
+    target.url_raw = json.dumps(parsed.urls_raw)
+    target.url_parsed = json.dumps(parsed.urls_parsed)
+    target.callback_number_raw = json.dumps(parsed.callback_numbers_raw)
+    target.callback_number_parsed = json.dumps(parsed.callback_numbers_parsed)
+    target.additional_contacts = parsed.additional_contacts
+    target.model_confidence = parsed.model_confidence
+    target.message_id = parsed.message_id
+    target.image_base64 = parsed.image_base64
+    target.body_html = parsed.body_html or parsed.body_text
+
+
+def _build_failed_email_stub(email_hash: str, file_name: str, error: str) -> InputEmail:
+    empty = json.dumps([])
     return InputEmail(
         email_hash=email_hash,
-        subject_id=parsed.subject_id,
-        sender=parsed.sender,
-        cc=json.dumps(parsed.cc),
-        subject=parsed.subject,
-        date_sent=parsed.date_sent,
-        date_reported=parsed.date_reported,
-        sending_source_raw=parsed.sending_source_raw,
-        sending_source_parsed=json.dumps(parsed.sending_source_parsed),
-        url_raw=json.dumps(parsed.urls_raw),
-        url_parsed=json.dumps(parsed.urls_parsed),
-        callback_number_raw=json.dumps(parsed.callback_numbers_raw),
-        callback_number_parsed=json.dumps(parsed.callback_numbers_parsed),
-        additional_contacts=parsed.additional_contacts,
-        model_confidence=parsed.model_confidence,
-        message_id=parsed.message_id,
-        image_base64=parsed.image_base64,
-        body_html=parsed.body_html or parsed.body_text,
+        parse_status="failed",
+        parse_error=error,
+        subject=f"[Parse Failed] {file_name}",
+        cc=empty,
+        url_raw=empty,
+        url_parsed=empty,
+        callback_number_raw=empty,
+        callback_number_parsed=empty,
+        sending_source_parsed=empty,
     )
 
 
@@ -120,6 +138,23 @@ def _prepare_pickle_payload(emails: Iterable[InputEmail]) -> List[dict]:
     return payload
 
 
+def _summarize_failures(attempts) -> str:
+    messages = [
+        f"{attempt.name}: {attempt.error_message}"
+        for attempt in attempts
+        if attempt.status == "failed" and attempt.error_message
+    ]
+    if messages:
+        return "; ".join(messages)
+    return "No parser strategy available"
+
+
+def _infer_mime_type(candidate) -> str:
+    if candidate.detected_type == "msg":
+        return "application/vnd.ms-outlook"
+    return "message/rfc822"
+
+
 def ingest_emails(
     session: Session,
     *,
@@ -138,29 +173,86 @@ def ingest_emails(
         return None
 
     ingested_emails: List[InputEmail] = []
+    skipped: List[str] = []
+    failures: List[str] = []
 
     for file_path in files:
         try:
-            email_hash = sha256_file(file_path)
+            original_bytes = file_path.read_bytes()
+        except Exception as exc:
+            logger.exception("Failed to read %s: %s", file_path, exc)
+            skipped.append(f"{file_path.name}: {exc}")
+            continue
+
+        try:
+            email_hash = sha256_digest(original_bytes)
             existing = find_input_email_by_hash(session, email_hash)
             if existing:
                 logger.info("Skipping already ingested email %s", file_path)
                 continue
 
-            parsed = parse_email_file(file_path)
-            input_email = _input_email_from_parsed(email_hash, parsed)
+            candidate = detect_candidate(file_path, original_bytes)
+            outcome = run_parsing_pipeline(candidate)
+
+            input_email: InputEmail
+            if outcome.parsed_email:
+                parsed = outcome.parsed_email
+                input_email = _input_email_from_parsed(email_hash, parsed)
+                input_email.parse_status = "success"
+                input_email.parse_error = None
+            else:
+                error_summary = _summarize_failures(outcome.attempts) or "Unknown parser failure"
+                input_email = _build_failed_email_stub(email_hash, file_path.name, error_summary)
+                failures.append(f"{file_path.name}: {error_summary}")
+
+            session.merge(
+                OriginalEmail(
+                    email_hash=email_hash,
+                    file_name=file_path.name,
+                    mime_type=_infer_mime_type(candidate),
+                    content=original_bytes,
+                )
+            )
+
             upsert_input_email(session, input_email)
-            attachment_models = _create_attachment_models(cfg, email_hash, input_email, parsed.attachments)
-            session.add_all(attachment_models)
-            session.add(_record_parser_run(input_email, parser_name="Parser1"))
+
+            if outcome.parsed_email:
+                parsed = outcome.parsed_email
+                attachment_models = _create_attachment_models(cfg, email_hash, input_email, parsed.attachments)
+                session.add_all(attachment_models)
+                for attachment in parsed.attachments:
+                    session.add(
+                        OriginalAttachment(
+                            email_hash=email_hash,
+                            file_name=attachment.file_name,
+                            mime_type=attachment.content_type,
+                            content=attachment.payload,
+                        )
+                    )
+
+            for attempt in outcome.attempts:
+                session.add(
+                    ParserRun(
+                        input_email=input_email,
+                        parser_name=attempt.name,
+                        version=attempt.version,
+                        status=attempt.status,
+                        error_message=attempt.error_message,
+                    )
+                )
+
             ingested_emails.append(input_email)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to ingest %s: %s", file_path, exc)
+            skipped.append(f"{file_path.name}: {exc}")
             continue
 
-    if not ingested_emails:
+    if not ingested_emails and not skipped:
         logger.info("No new emails ingested.")
         return None
+
+    if not ingested_emails and (skipped or failures):
+        return IngestionResult(batch=None, email_ids=[], skipped=skipped, failures=failures)
 
     session.flush()
 
@@ -184,5 +276,10 @@ def ingest_emails(
     session.commit()
     logger.info("Ingested %d emails into batch %s", len(ingested_emails), batch_label)
 
-    return pickle_batch, [email.id for email in ingested_emails]
+    return IngestionResult(
+        batch=pickle_batch,
+        email_ids=[email.id for email in ingested_emails],
+        skipped=skipped,
+        failures=failures,
+    )
 

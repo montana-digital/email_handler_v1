@@ -18,6 +18,8 @@ class InputEmail(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    parse_status: Mapped[str] = mapped_column(String(32), default="success", server_default="success")
+    parse_error: Mapped[Optional[str]] = mapped_column(Text, default=None)
     subject_id: Mapped[Optional[str]] = mapped_column(String(64), index=True, default=None)
     sender: Mapped[Optional[str]] = mapped_column(String(320), default=None)
     cc: Mapped[Optional[str]] = mapped_column(Text, default=None)
@@ -48,6 +50,28 @@ class InputEmail(Base):
         "ParserRun", back_populates="input_email", cascade="all, delete-orphan"
     )
     pickle_batch: Mapped[Optional["PickleBatch"]] = relationship("PickleBatch", back_populates="input_emails")
+
+
+class OriginalEmail(Base):
+    __tablename__ = "original_emails"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    file_name: Mapped[Optional[str]] = mapped_column(String(512), default=None)
+    mime_type: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    content: Mapped[bytes] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OriginalAttachment(Base):
+    __tablename__ = "original_attachments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email_hash: Mapped[str] = mapped_column(String(128), index=True)
+    file_name: Mapped[Optional[str]] = mapped_column(String(512), default=None)
+    mime_type: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    content: Mapped[bytes] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class StandardEmail(Base):
@@ -112,6 +136,7 @@ class ParserRun(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     status: Mapped[str] = mapped_column(String(32), default="success")
     notes: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, default=None)
 
     input_email: Mapped[InputEmail] = relationship("InputEmail", back_populates="parser_runs")
 

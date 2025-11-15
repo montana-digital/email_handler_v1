@@ -310,7 +310,7 @@ def render(state: AppState) -> None:
                 st.error(f"ANALYZE failed: {exc}")
     with maintenance_cols[2]:
         if st.button("Refresh Table List"):
-            st.experimental_rerun()
+            st.rerun()
 
     st.subheader("SQL Editor")
     st.write(
@@ -386,6 +386,6 @@ def render(state: AppState) -> None:
                 )
                 reset_engine(state.config)
                 st.success("Application reset successfully. Reloading...")
-                st.experimental_rerun()
+                st.rerun()
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Failed to reset application: {exc}")
