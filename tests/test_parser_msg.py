@@ -234,3 +234,67 @@ def test_prettify_html_error_handling():
     assert result is not None
     assert "Content" in result
 
+
+def test_infer_attachment_mime_type_eml():
+    """Test that EML attachments get correct MIME type inference."""
+    from app.parsers.parser_email import _infer_attachment_mime_type
+
+    # EML file with generic MIME type should be inferred correctly
+    assert _infer_attachment_mime_type("email.eml", "application/octet-stream") == "message/rfc822"
+    assert _infer_attachment_mime_type("email.eml", None) == "message/rfc822"
+    assert _infer_attachment_mime_type("email.eml", "binary/octet-stream") == "message/rfc822"
+    
+    # EML file with correct MIME type should be kept
+    assert _infer_attachment_mime_type("email.eml", "message/rfc822") == "message/rfc822"
+    
+    # Other file types
+    assert _infer_attachment_mime_type("document.msg", None) == "application/vnd.ms-outlook"
+    assert _infer_attachment_mime_type("image.png", None) == "image/png"
+    assert _infer_attachment_mime_type("document.pdf", None) == "application/pdf"
+
+
+def test_parse_msg_with_eml_attachment(monkeypatch, tmp_path):
+    """Test MSG parsing with EML attachment."""
+    msg_path = tmp_path / "with_eml.msg"
+    msg_path.write_bytes(b"msg content")
+
+    class _FakeAttachmentWithEML:
+        def __init__(self) -> None:
+            self.longFilename = "nested_email.eml"
+            self.shortFilename = None
+            self.mimeType = "application/octet-stream"  # Generic type that should be inferred
+            self.data = b"From: sender@example.com\nSubject: Nested EML\n\nContent"
+
+    class _FakeMsgWithEML:
+        def __init__(self, path: str) -> None:
+            self.sender = "alerts@example.com"
+            self.sender_email = None
+            self.to = "target@example.com"
+            self.cc = None
+            self.subject = "MSG with EML attachment"
+            self.date = "Wed, 12 Nov 2025 19:54:38 -0000"
+            self.message_id = "<msg-id>"
+            self.htmlBody = "<p>Test</p>"
+            self.body = "Test"
+            self.attachments = [_FakeAttachmentWithEML()]
+
+    monkeypatch.setattr(parser_email.extract_msg, "Message", lambda path: _FakeMsgWithEML(path))
+
+    class _FakeUrl:
+        def __init__(self) -> None:
+            self.original = "https://example.com"
+            self.normalized = self.original
+            self.domain = "example.com"
+
+    monkeypatch.setattr(parser_email, "extract_urls", lambda text: [] if not text else [])
+    monkeypatch.setattr(parser_email, "extract_phone_numbers", lambda text: [])
+
+    parsed = parser_email.parse_msg_file(msg_path)
+
+    # Verify EML attachment was extracted
+    assert len(parsed.attachments) == 1
+    assert parsed.attachments[0].file_name == "nested_email.eml"
+    # MIME type should be inferred as message/rfc822, not application/octet-stream
+    assert parsed.attachments[0].content_type == "message/rfc822"
+    assert parsed.attachments[0].payload == b"From: sender@example.com\nSubject: Nested EML\n\nContent"
+

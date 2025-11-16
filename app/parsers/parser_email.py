@@ -19,6 +19,8 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     extract_msg = None  # type: ignore[assignment]
 
+from loguru import logger
+
 from app.parsers.models import ParsedAttachment, ParsedEmail, ParsedStandardEmail
 from app.parsers.parser_phones import extract_phone_numbers
 from app.parsers.parser_urls import extract_urls
@@ -179,6 +181,38 @@ def _extract_image_base64(body: str | None) -> Optional[str]:
     return None
 
 
+def _infer_attachment_mime_type(file_name: str, provided_mime_type: str | None) -> str:
+    """Infer MIME type from filename if provided type is missing or generic.
+    
+    This is especially important for EML attachments which may not have
+    the correct MIME type set in MSG files.
+    """
+    if provided_mime_type and provided_mime_type not in ("application/octet-stream", "binary/octet-stream"):
+        return provided_mime_type
+    
+    # Infer from file extension
+    file_name_lower = file_name.lower()
+    if file_name_lower.endswith(".eml"):
+        return "message/rfc822"
+    elif file_name_lower.endswith(".msg"):
+        return "application/vnd.ms-outlook"
+    elif file_name_lower.endswith((".png",)):
+        return "image/png"
+    elif file_name_lower.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    elif file_name_lower.endswith(".gif"):
+        return "image/gif"
+    elif file_name_lower.endswith(".pdf"):
+        return "application/pdf"
+    elif file_name_lower.endswith((".doc", ".docx")):
+        return "application/msword" if file_name_lower.endswith(".doc") else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    elif file_name_lower.endswith((".xls", ".xlsx")):
+        return "application/vnd.ms-excel" if file_name_lower.endswith(".xls") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    
+    # Default fallback
+    return provided_mime_type or "application/octet-stream"
+
+
 def _parse_attachments(message: EmailMessage | Message) -> list[ParsedAttachment]:
     attachments: list[ParsedAttachment] = []
     for part in message.walk():
@@ -186,10 +220,12 @@ def _parse_attachments(message: EmailMessage | Message) -> list[ParsedAttachment
         if disposition != "attachment":
             continue
         payload = part.get_payload(decode=True) or b""
+        file_name = part.get_filename() or "attachment"
+        content_type = _infer_attachment_mime_type(file_name, part.get_content_type())
         attachments.append(
             ParsedAttachment(
-                file_name=part.get_filename() or "attachment",
-                content_type=part.get_content_type(),
+                file_name=file_name,
+                content_type=content_type,
                 content_id=part.get("Content-ID"),
                 payload=payload,
                 size=len(payload),
@@ -292,11 +328,60 @@ def parse_msg_file(path: Path) -> ParsedEmail:
 
     attachments: list[ParsedAttachment] = []
     for att in msg.attachments:
-        payload = att.data or b""
+        file_name = att.longFilename or att.shortFilename or "attachment"
+        original_mime_type = getattr(att, "mimeType", None) or getattr(att, "contentType", None)
+        
+        # Infer MIME type from filename if missing or generic (important for EML attachments)
+        content_type = _infer_attachment_mime_type(file_name, original_mime_type)
+        
+        # Try multiple ways to get attachment data
+        # extract_msg may store it in different attributes or require saving to disk first
+        payload = None
+        
+        # Method 1: Direct data attribute
+        if hasattr(att, "data") and att.data:
+            payload = att.data
+        # Method 2: Binary attribute
+        elif hasattr(att, "binary") and att.binary:
+            payload = att.binary
+        # Method 3: Try to save and read (extract_msg may require this for some attachments)
+        else:
+            try:
+                import tempfile
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    tmp_path = Path(tmpdir) / file_name
+                    # Try to save attachment to temp file
+                    if hasattr(att, "save"):
+                        att.save(tmp_path)
+                        if tmp_path.exists():
+                            payload = tmp_path.read_bytes()
+                    # Alternative: try to get data after saving
+                    elif hasattr(msg, "saveAttachments"):
+                        msg.saveAttachments(tmpdir)
+                        saved_path = Path(tmpdir) / file_name
+                        if saved_path.exists():
+                            payload = saved_path.read_bytes()
+            except Exception as exc:
+                logger.debug("Failed to extract attachment '%s' via save method: %s", file_name, exc)
+        
+        # Convert string to bytes if needed
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8", errors="replace")
+        
+        # Fallback to empty bytes if still no payload
+        if payload is None:
+            payload = b""
+            logger.warning(
+                "MSG attachment '%s' (type: %s) has no extractable data. "
+                "This may indicate the attachment was not properly embedded in the MSG file.",
+                file_name,
+                original_mime_type,
+            )
+        
         attachments.append(
             ParsedAttachment(
-                file_name=att.longFilename or att.shortFilename or "attachment",
-                content_type=att.mimeType,
+                file_name=file_name,
+                content_type=content_type,
                 content_id=None,
                 payload=payload,
                 size=len(payload),
