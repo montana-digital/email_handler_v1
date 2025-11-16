@@ -139,20 +139,62 @@ def _prepare_pickle_payload(emails: Iterable[InputEmail]) -> List[dict]:
 
 
 def _summarize_failures(attempts) -> str:
-    messages = [
-        f"{attempt.name}: {attempt.error_message}"
-        for attempt in attempts
-        if attempt.status == "failed" and attempt.error_message
-    ]
+    """Summarize parser failures with user-friendly messages."""
+    messages = []
+    for attempt in attempts:
+        if attempt.status == "failed" and attempt.error_message:
+            error_msg = attempt.error_message
+            
+            # Convert technical parser errors to user-friendly messages
+            if "codec" in error_msg.lower() and "decode" in error_msg.lower():
+                messages.append("Email encoding issue - file may be corrupted or in unsupported format")
+            elif "extract-msg" in error_msg.lower() or "extract_msg" in error_msg.lower():
+                messages.append("MSG parser unavailable - install 'extract-msg' package")
+            elif "mailparser" in error_msg.lower():
+                messages.append("Advanced parser unavailable - install 'mail-parser' package (optional)")
+            elif "does not resemble an email" in error_msg.lower():
+                messages.append("File does not appear to be a valid email")
+            else:
+                # Keep original message but truncate if too long
+                clean_msg = error_msg[:150] + "..." if len(error_msg) > 150 else error_msg
+                messages.append(f"{attempt.name}: {clean_msg}")
+    
     if messages:
         return "; ".join(messages)
-    return "No parser strategy available"
+    return "No parser strategy available - check that email file is valid"
 
 
 def _infer_mime_type(candidate) -> str:
     if candidate.detected_type == "msg":
         return "application/vnd.ms-outlook"
     return "message/rfc822"
+
+
+def _format_user_error(exc: Exception, file_name: str) -> str:
+    """Convert technical exceptions to user-friendly error messages."""
+    exc_type = type(exc).__name__
+    exc_str = str(exc)
+    
+    if exc_type == "PermissionError":
+        return f"{file_name}: File is locked or access denied. Close any programs using this file and try again."
+    elif exc_type == "FileNotFoundError":
+        return f"{file_name}: File was moved or deleted before processing."
+    elif exc_type == "OSError":
+        if "WinError 5" in exc_str or "access is denied" in exc_str.lower():
+            return f"{file_name}: Access denied. Check file permissions or close programs using this file."
+        elif "WinError 32" in exc_str or "being used by another process" in exc_str.lower():
+            return f"{file_name}: File is in use by another program. Close it and try again."
+        elif "No space left" in exc_str or "disk full" in exc_str.lower():
+            return f"{file_name}: Disk is full. Free up space and try again."
+        else:
+            return f"{file_name}: System error - {exc_str}"
+    elif exc_type == "MemoryError":
+        return f"{file_name}: File is too large to process. Maximum recommended size is 50MB."
+    elif "codec" in exc_str.lower() and "decode" in exc_str.lower():
+        return f"{file_name}: Encoding issue detected. The file may be corrupted or in an unsupported format."
+    else:
+        # For unknown errors, provide a generic but helpful message
+        return f"{file_name}: Processing failed - {exc_str[:100]}"
 
 
 def ingest_emails(
@@ -176,12 +218,25 @@ def ingest_emails(
     skipped: List[str] = []
     failures: List[str] = []
 
+    # File size limits (in bytes)
+    MAX_EMAIL_SIZE = 50 * 1024 * 1024  # 50MB
+    MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024  # 10MB
+    
     for file_path in files:
         try:
+            # Check file size before reading
+            file_size = file_path.stat().st_size
+            if file_size > MAX_EMAIL_SIZE:
+                skipped.append(
+                    f"{file_path.name}: File is too large ({file_size / (1024*1024):.1f}MB). "
+                    f"Maximum size is {MAX_EMAIL_SIZE / (1024*1024):.0f}MB."
+                )
+                continue
+            
             original_bytes = file_path.read_bytes()
         except Exception as exc:
             logger.exception("Failed to read %s: %s", file_path, exc)
-            skipped.append(f"{file_path.name}: {exc}")
+            skipped.append(_format_user_error(exc, file_path.name))
             continue
 
         try:
@@ -218,9 +273,25 @@ def ingest_emails(
 
             if outcome.parsed_email:
                 parsed = outcome.parsed_email
-                attachment_models = _create_attachment_models(cfg, email_hash, input_email, parsed.attachments)
-                session.add_all(attachment_models)
+                # Validate attachment sizes
+                valid_attachments = []
                 for attachment in parsed.attachments:
+                    if attachment.size > MAX_ATTACHMENT_SIZE:
+                        logger.warning(
+                            "Skipping attachment %s (size: %d bytes) - exceeds limit",
+                            attachment.file_name,
+                            attachment.size,
+                        )
+                        skipped.append(
+                            f"{file_path.name}: Attachment '{attachment.file_name}' is too large "
+                            f"({attachment.size / (1024*1024):.1f}MB). Maximum size is {MAX_ATTACHMENT_SIZE / (1024*1024):.0f}MB."
+                        )
+                    else:
+                        valid_attachments.append(attachment)
+                
+                attachment_models = _create_attachment_models(cfg, email_hash, input_email, valid_attachments)
+                session.add_all(attachment_models)
+                for attachment in valid_attachments:
                     session.add(
                         OriginalAttachment(
                             email_hash=email_hash,
@@ -244,7 +315,7 @@ def ingest_emails(
             ingested_emails.append(input_email)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to ingest %s: %s", file_path, exc)
-            skipped.append(f"{file_path.name}: {exc}")
+            skipped.append(_format_user_error(exc, file_path.name))
             continue
 
     if not ingested_emails and not skipped:

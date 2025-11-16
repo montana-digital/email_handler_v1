@@ -89,8 +89,14 @@ def _render_email_body(body_html: str) -> None:
 
 
 def _render_download_buttons(detail: dict, attachments: list[dict], config) -> None:
-    original_payload = find_original_email_bytes(config, detail.get("email_hash"))
-    attachments_zip = build_attachments_zip(attachments, prefix=f"standard_email_{detail.get('id', 'attachments')}")
+    with session_scope() as session:
+        original_payload = find_original_email_bytes(session, config, detail.get("email_hash"))
+        attachments_zip = build_attachments_zip(
+            attachments,
+            prefix=f"standard_email_{detail.get('id', 'attachments')}",
+            session=session,
+            email_hash=detail.get("email_hash"),
+        )
     single_html = build_single_email_html(detail)
 
     download_cols = st.columns(3)
@@ -101,7 +107,7 @@ def _render_download_buttons(detail: dict, attachments: list[dict], config) -> N
             file_name=original_payload[0] if original_payload else "original_unavailable.txt",
             mime="application/octet-stream",
             disabled=original_payload is None,
-            use_container_width=True,
+            width="stretch",
         )
         if original_payload is None:
             st.caption("Original file not found.")
@@ -112,7 +118,7 @@ def _render_download_buttons(detail: dict, attachments: list[dict], config) -> N
             data=single_html,
             file_name=f"standard_email_{detail.get('id', 'detail')}.html",
             mime="text/html",
-            use_container_width=True,
+            width="stretch",
         )
 
     with download_cols[2]:
@@ -122,22 +128,20 @@ def _render_download_buttons(detail: dict, attachments: list[dict], config) -> N
             file_name=attachments_zip[0] if attachments_zip else "attachments_unavailable.zip",
             mime="application/zip",
             disabled=attachments_zip is None,
-            use_container_width=True,
+            width="stretch",
         )
         if attachments_zip is None:
             st.caption("No attachments available.")
 
 
-def render(state: AppState) -> None:
-    st.header("Database Email Archive")
-    st.write("Review emails that have been promoted into the `standard_emails` table.")
-
+@st.fragment
+def _render_saved_email_table(state: AppState) -> tuple[list[dict], list[int]]:
     with session_scope() as session:
         records = list_standard_email_records(session, limit=2000)
 
     if not records:
         st.info("No standard emails are available yet. Promote emails from the Email Display page first.")
-        return
+        return [], []
 
     state.standard_email_search = st.text_input(
         "Search subject, sender, or hash",
@@ -194,7 +198,7 @@ def render(state: AppState) -> None:
 
     if not filtered:
         st.warning("No saved emails matched the current search criteria.")
-        return
+        return [], []
 
     page_size = st.slider("Rows per page", min_value=25, max_value=200, step=25, value=50)
     total_records = len(filtered)
@@ -220,7 +224,7 @@ def render(state: AppState) -> None:
 
     st.subheader("Saved Email Summary")
     st.caption(f"Showing {len(page_records)} of {total_records} saved emails (page {current_page}/{total_pages}).")
-    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(table_rows), width="stretch", hide_index=True)
 
     report_selection = st.multiselect(
         "Select emails for HTML report",
@@ -230,7 +234,7 @@ def render(state: AppState) -> None:
         key="standard_report_selection",
     )
 
-    if st.button("Generate HTML Report (Saved Emails)", disabled=not report_selection, use_container_width=True):
+    if st.button("Generate HTML Report (Saved Emails)", disabled=not report_selection, width="stretch"):
         with session_scope() as session:
             artifacts = generate_email_report(session, report_selection, config=state.config)
         if artifacts:
@@ -262,7 +266,7 @@ def render(state: AppState) -> None:
                         file_name=html_path.name,
                         mime="text/html",
                         key=f"download_standard_report_{html_path.stem}",
-                        use_container_width=True,
+                        width="stretch",
                     )
         with artifact_cols[1]:
             if csv_text_path.exists():
@@ -273,7 +277,7 @@ def render(state: AppState) -> None:
                         file_name=csv_text_path.name,
                         mime="text/csv",
                         key=f"download_standard_csv_text_{csv_text_path.stem}",
-                        use_container_width=True,
+                        width="stretch",
                     )
         with artifact_cols[2]:
             if csv_full_path.exists():
@@ -284,7 +288,7 @@ def render(state: AppState) -> None:
                         file_name=csv_full_path.name,
                         mime="text/csv",
                         key=f"download_standard_csv_full_{csv_full_path.stem}",
-                        use_container_width=True,
+                        width="stretch",
                     )
         if artifact_state.get("attachments_zip"):
             path_obj = Path(artifact_state["attachments_zip"])
@@ -297,7 +301,7 @@ def render(state: AppState) -> None:
                             file_name=path_obj.name,
                             mime="application/zip",
                             key=f"download_standard_attachments_zip_{path_obj.stem}",
-                            use_container_width=True,
+                            width="stretch",
                         )
         if artifact_state.get("emails_zip"):
             path_obj = Path(artifact_state["emails_zip"])
@@ -310,28 +314,15 @@ def render(state: AppState) -> None:
                             file_name=path_obj.name,
                             mime="application/zip",
                             key=f"download_standard_emails_zip_{path_obj.stem}",
-                            use_container_width=True,
+                            width="stretch",
                         )
 
     available_ids = [row["ID"] for row in table_rows]
-    if state.selected_standard_email_id not in available_ids:
-        state.selected_standard_email_id = available_ids[0]
+    return filtered, available_ids
 
-    selected_id = st.selectbox(
-        "Select email for detail view",
-        options=available_ids,
-        index=available_ids.index(state.selected_standard_email_id),
-        format_func=lambda record_id: f"Email #{record_id}",
-    )
-    state.selected_standard_email_id = selected_id
 
-    with session_scope() as session:
-        detail = get_standard_email_detail(session, selected_id)
-
-    if not detail:
-        st.error("Unable to load saved email details.")
-        return
-
+@st.fragment
+def _render_saved_email_detail(state: AppState, detail: dict) -> None:
     st.subheader("Saved Email Details")
     with st.container(border=True):
         st.markdown("#### Metadata")
@@ -391,80 +382,49 @@ def render(state: AppState) -> None:
                         try:
                             with path.open("rb") as fh:
                                 Image.open(fh)
-                            st.image(str(path), caption=file_name, use_container_width=True)
+                            st.image(str(path), caption=file_name, width="stretch")
                         except UnidentifiedImageError:
-                            st.info(f"Preview not available for {file_name}.")
-                        with path.open("rb") as handle:
-                            st.download_button(
-                                label=f"Download {file_name}",
-                                data=handle.read(),
-                                file_name=file_name,
-                                mime=attachment.get("file_type") or "application/octet-stream",
-                                key=f"download_standard_image_{attachment['id']}",
-                            )
-
+                            st.info(f"{file_name}: preview not available for this image type.")
                 elif category == "pdf":
                     st.markdown("#### PDFs")
                     for attachment in items:
-                        file_name = attachment["file_name"]
-                        storage_path = attachment.get("storage_path")
-                        if not storage_path:
-                            st.warning(f"{file_name} missing storage path.")
-                            continue
-                        path = Path(storage_path)
-                        if not path.exists():
-                            st.warning(f"{file_name} not found on disk.")
-                            continue
-                        _render_pdf_preview(path, file_name)
-                        with path.open("rb") as handle:
-                            st.download_button(
-                                label=f"Download {file_name}",
-                                data=handle.read(),
-                                file_name=file_name,
-                                mime=attachment.get("file_type") or "application/pdf",
-                                key=f"download_standard_pdf_{attachment['id']}",
-                            )
-
+                        st.code(f"{attachment['file_name']} · {attachment['display_size']}")
                 elif category == "csv":
-                    st.markdown("#### CSV Files")
+                    st.markdown("#### CSVs")
                     for attachment in items:
-                        file_name = attachment["file_name"]
-                        storage_path = attachment.get("storage_path")
-                        if not storage_path:
-                            st.warning(f"{file_name} missing storage path.")
-                            continue
-                        path = Path(storage_path)
-                        if not path.exists():
-                            st.warning(f"{file_name} not found on disk.")
-                            continue
-                        _render_csv_preview(path, file_name)
-                        with path.open("rb") as handle:
-                            st.download_button(
-                                label=f"Download {file_name}",
-                                data=handle.read(),
-                                file_name=file_name,
-                                mime=attachment.get("file_type") or "text/csv",
-                                key=f"download_standard_csv_{attachment['id']}",
-                            )
-
+                        st.code(f"{attachment['file_name']} · {attachment['display_size']}")
                 else:
                     st.markdown("#### Other Attachments")
                     for attachment in items:
-                        file_name = attachment["file_name"]
-                        storage_path = attachment.get("storage_path")
-                        if not storage_path:
-                            st.warning(f"{file_name} missing storage path.")
-                            continue
-                        path = Path(storage_path)
-                        if not path.exists():
-                            st.warning(f"{file_name} not found on disk.")
-                            continue
-                        with path.open("rb") as handle:
-                            st.download_button(
-                                label=f"Download {file_name}",
-                                data=handle.read(),
-                                file_name=file_name,
-                                mime=attachment.get("file_type") or "application/octet-stream",
-                                key=f"download_standard_other_{attachment['id']}",
-                            )
+                        st.code(f"{attachment['file_name']} · {attachment['display_size']}")
+
+        st.divider()
+def render(state: AppState) -> None:
+    st.header("Database Email Archive")
+    st.write("Review emails that have been promoted into the `standard_emails` table.")
+
+    filtered_records, available_ids = _render_saved_email_table(state)
+    if not filtered_records or not available_ids:
+        return
+
+    if state.selected_standard_email_id not in available_ids:
+        state.selected_standard_email_id = available_ids[0]
+
+    selected_id = st.selectbox(
+        "Select email for detail view",
+        options=available_ids,
+        index=available_ids.index(state.selected_standard_email_id),
+        format_func=lambda record_id: f"Email #{record_id}",
+    )
+    state.selected_standard_email_id = selected_id
+
+    with session_scope() as session:
+        detail = get_standard_email_detail(session, selected_id)
+
+    if not detail:
+        st.error("Unable to load saved email details.")
+        return
+
+    _render_saved_email_detail(state, detail)
+    return
 

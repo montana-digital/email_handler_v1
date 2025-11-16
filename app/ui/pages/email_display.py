@@ -95,7 +95,7 @@ def _render_download_buttons(email_detail: dict, attachments: list[dict], config
             file_name=original_payload[0] if original_payload else "original_unavailable.txt",
             mime="application/octet-stream",
             disabled=original_payload is None,
-            use_container_width=True,
+            width="stretch",
         )
         if original_payload is None:
             st.caption("Original file not found.")
@@ -106,7 +106,7 @@ def _render_download_buttons(email_detail: dict, attachments: list[dict], config
             data=single_html,
             file_name=f"email_{email_detail.get('id', 'detail')}.html",
             mime="text/html",
-            use_container_width=True,
+            width="stretch",
         )
 
     with download_cols[2]:
@@ -116,32 +116,14 @@ def _render_download_buttons(email_detail: dict, attachments: list[dict], config
             file_name=attachments_zip[0] if attachments_zip else "attachments_unavailable.zip",
             mime="application/zip",
             disabled=attachments_zip is None,
-            use_container_width=True,
+            width="stretch",
         )
         if attachments_zip is None:
             st.caption("No attachments available.")
 
 
-def render(state: AppState) -> None:
-    st.header("Email Display")
-    st.write("Ingest new batches, review parsed results, and edit metadata before upload.")
-
-    if importlib.util.find_spec("extract_msg") is None:
-        st.warning(
-            "MSG ingestion is disabled because the optional `extract-msg` package is missing. "
-            "Install it via `pip install extract-msg` to process `.msg` files."
-        )
-
-    with st.expander("Parser Diagnostics", expanded=False):
-        caps = parser_capabilities()
-        for name, info in caps.items():
-            status = info.get("available")
-            description = info.get("description", "")
-            if status:
-                st.success(f"{name}: available — {description}")
-            else:
-                st.warning(f"{name}: missing — {description}")
-
+@st.fragment
+def _render_ingestion_panel(state: AppState) -> None:
     eml_count, msg_count = _input_counts(state.config.input_dir)
     with st.container():
         st.caption(
@@ -151,7 +133,7 @@ def render(state: AppState) -> None:
 
     col_ingest, col_refresh = st.columns([1, 1])
     with col_ingest:
-        if st.button("Ingest New Emails", use_container_width=True):
+        if st.button("Ingest New Emails", width="stretch"):
             with session_scope() as session:
                 result = ingest_emails(session, config=state.config)
             if result is None:
@@ -187,9 +169,12 @@ def render(state: AppState) -> None:
                 elif not result.email_ids and not result.batch:
                     st.info("No new emails were saved. See warnings above for skipped files.")
     with col_refresh:
-        if st.button("Refresh Batches", use_container_width=True):
+        if st.button("Refresh Batches", width="stretch"):
             st.rerun()
 
+
+@st.fragment
+def _render_batch_panel(state: AppState) -> None:
     with session_scope() as session:
         batches = get_batches(session)
 
@@ -301,7 +286,7 @@ def render(state: AppState) -> None:
 
     st.subheader("Batch Summary")
     st.caption(f"Showing {len(page_records)} of {total_records} results (page {current_page}/{total_pages}).")
-    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(table_rows), width="stretch", hide_index=True)
 
     available_ids = [row["ID"] for row in table_rows]
 
@@ -318,8 +303,10 @@ def render(state: AppState) -> None:
 
     finalize_col, report_col, promote_col = st.columns([1, 1, 2])
 
+    finalize_col, report_col, promote_col = st.columns([1, 1, 2])
+
     with finalize_col:
-        if st.button("Finalize Batch", use_container_width=True):
+        if st.button("Finalize Batch", width="stretch"):
             with session_scope() as session:
                 result = finalize_batch(session, state.selected_batch_id, config=state.config)
             if result:
@@ -330,7 +317,7 @@ def render(state: AppState) -> None:
                 st.error("Unable to finalize batch. Check logs for details.")
 
     with report_col:
-        generate_report = st.button("Generate HTML Report", disabled=not report_selection, use_container_width=True)
+        generate_report = st.button("Generate HTML Report", disabled=not report_selection, width="stretch")
     if generate_report:
         with session_scope() as session:
             artifacts = generate_email_report(
@@ -419,7 +406,7 @@ def render(state: AppState) -> None:
         key="promotion_selection",
     )
 
-    if promote_col.button("Promote to Standard Emails", disabled=not promotion_selection, use_container_width=True):
+    if promote_col.button("Promote to Standard Emails", disabled=not promotion_selection, width="stretch"):
         with session_scope() as session:
             promotion_results = promote_to_standard_emails(
                 session,
@@ -468,7 +455,7 @@ def render(state: AppState) -> None:
             "Retry Parsing",
             disabled=parse_status == "success",
             key="retry_parse_button",
-            use_container_width=False,
+            width="content",
         ):
             with session_scope() as session:
                 reparse_result = reparse_email(session, state.selected_email_id)
@@ -530,7 +517,7 @@ def render(state: AppState) -> None:
                         try:
                             with file_path.open("rb") as fh:
                                 Image.open(fh)
-                            st.image(str(file_path), caption=file_name, use_container_width=True)
+                            st.image(str(file_path), caption=file_name, width="stretch")
                         except UnidentifiedImageError:
                             st.info("Preview not available for this attachment type.")
 
@@ -622,3 +609,27 @@ def render(state: AppState) -> None:
                     st.rerun()
                 else:
                     st.error("Update failed. Please check the log for details.")
+
+
+def render(state: AppState) -> None:
+    st.header("Email Display")
+    st.write("Ingest new batches, review parsed results, and edit metadata before upload.")
+
+    if importlib.util.find_spec("extract_msg") is None:
+        st.warning(
+            "MSG ingestion is disabled because the optional `extract-msg` package is missing. "
+            "Install it via `pip install extract-msg` to process `.msg` files."
+        )
+
+    with st.expander("Parser Diagnostics", expanded=False):
+        caps = parser_capabilities()
+        for name, info in caps.items():
+            status = info.get("available")
+            description = info.get("description", "")
+            if status:
+                st.success(f"{name}: available — {description}")
+            else:
+                st.warning(f"{name}: missing — {description}")
+
+    _render_ingestion_panel(state)
+    _render_batch_panel(state)

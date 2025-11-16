@@ -15,7 +15,7 @@ from sqlalchemy import func
 from app.db.init_db import session_scope
 from app.db.models import Attachment, InputEmail, PickleBatch, StandardEmail
 from app.ui.state import AppState
-from docs.animations import inject_reveal_animations
+from app.ui.styles.animations import inject_reveal_animations
 
 APP_VERSION = "0.4.0"
 KEY_DEPENDENCIES = ["streamlit", "sqlalchemy", "pandas", "pydantic", "loguru"]

@@ -51,12 +51,15 @@
   - `attachments.py`: manages attachment extraction, categorization, and ZIP packaging.
   - `reporting.py`: builds HTML summaries for selected emails.
   - `standard_emails.py`: promotes curated `InputEmail` records into the `StandardEmail` table with supplemental parsing.
+  - `standard_email_records.py`: provides read-optimized helpers for Standard Email listings and detail views.
+  - `email_exports.py`: assembles HTML exports plus attachment bundles for analyst download workflows.
+  - `database_admin.py`: introspects SQLite schema, performs row edits/deletes/inserts, truncates tables, and runs ad-hoc SQL in a controlled fashion.
   - `powershell.py`: launches PowerShell scripts, captures execution output, and loads manifest metadata for script UX.
   - `batch_finalization.py`: archives reviewed pickle batches, updates status, and records finalization timestamps.
 - `app/ui/`
   - `bootstrap.py`: loads configuration, initializes the database, renders the shared sidebar, and returns session state for every page.
   - `sidebar.py`: shared sidebar layout (environment summary, docs links, notifications, quick-open directory buttons).
-  - `pages/`: renderers for `home`, `deploy_scripts`, `settings`, `email_display`, `attachments`.
+  - `pages/`: renderers for `home`, `deploy_scripts`, `settings`, `email_display`, `attachments`, and the `database_display` Standard Email archive.
   - `state.py`: shared state container bridging Streamlit session with database services.
   - `main_nav.py`: legacy navigation helper retained for backward compatibility.
 
@@ -104,6 +107,9 @@
 - **Standard Email Workflow**: extend promotion pipeline with bulk approval, audit history, and StandardEmail browsing UI.
 - **Reporting Enhancements**: add templated exports (PDF/CSV) and scheduled batch summaries.
 - **Testing & QA**: finish automating ingestion edge cases, integrate `.msg` regression fixtures, and wire test runs into CI.
-- **Content/CMS**: implement markdown-based content collections (`src/content/`) to satisfy editorial requirements.
+- **Content/CMS**: implement markdown-based content collections under an `app/content/` directory (exposed via Streamlit pages) to satisfy editorial requirements.
 - **Collaboration**: design multi-user access, role-based permissions, and change tracking for shared analyst deployments.
+
+## 11. Legacy Artifacts
+- Archived prototypes from the original Email Butler experiment now live under `docs/archive/` and are preserved strictly for reference. They are not part of the active application runtime.
 

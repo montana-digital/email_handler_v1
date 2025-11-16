@@ -8,10 +8,12 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, Optional, Union
+import time
 
 import streamlit as st
 
 from app.config import PROJECT_ROOT
+from app.services.parsing import parser_capabilities
 from app.ui.state import AppState
 
 try:
@@ -68,8 +70,20 @@ def _directory_size(root: Path) -> int:
     return total
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_resource
+def _resource_cache() -> Dict[str, float | Dict[str, Optional[float]]]:
+    return {"timestamp": 0.0, "data": {}}
+
+
 def _resource_snapshot(project_root: str, database_url: str) -> Dict[str, Optional[float]]:
+    cache = _resource_cache()
+    if time.time() - cache["timestamp"] > 60 or not cache["data"]:
+        cache["data"] = _compute_resource_snapshot(project_root, database_url)
+        cache["timestamp"] = time.time()
+    return cache["data"]  # type: ignore[return-value]
+
+
+def _compute_resource_snapshot(project_root: str, database_url: str) -> Dict[str, Optional[float]]:
     root_path = Path(project_root)
     app_size = _directory_size(root_path)
 
@@ -114,7 +128,7 @@ def render_sidebar(state: AppState) -> None:
     st.sidebar.title("Email Handler")
     logo_path = _find_logo()
     if logo_path:
-        st.sidebar.image(str(logo_path), use_container_width=True)
+        st.sidebar.image(str(logo_path), width="stretch")
     st.sidebar.caption(f"Version {APP_VERSION}")
     st.sidebar.divider()
 
@@ -127,21 +141,39 @@ def render_sidebar(state: AppState) -> None:
         except Exception as exc:  # noqa: BLE001
             st.sidebar.error(f"Failed to open {label.lower()}: {exc}")
 
-    if st.sidebar.button("Open Input Folder", use_container_width=True):
+    if st.sidebar.button("Open Input Folder", width="stretch"):
         _try_open("input folder", state.config.input_dir)
-    if st.sidebar.button("Open Output Folder", use_container_width=True):
+    if st.sidebar.button("Open Output Folder", width="stretch"):
         _try_open("output folder", state.config.output_dir)
-    if st.sidebar.button("Open Cache Folder", use_container_width=True):
+    if st.sidebar.button("Open Cache Folder", width="stretch"):
         _try_open("cache folder", state.config.pickle_cache_dir)
-    if st.sidebar.button("Open Scripts Folder", use_container_width=True):
+    if st.sidebar.button("Open Scripts Folder", width="stretch"):
         _try_open("scripts folder", state.config.scripts_dir)
 
     db_path = state.config.database_url
     if db_path.startswith("sqlite:///"):
         db_file = Path(db_path.replace("sqlite:///", "")).expanduser()
-        if st.sidebar.button("Open Database Location", use_container_width=True):
+        if st.sidebar.button("Open Database Location", width="stretch"):
             _try_open("database location", db_file.parent if db_file.is_file() else db_file)
 
+    # Parser diagnostics
+    parser_status = parser_capabilities()
+    with st.sidebar.expander("Parser Status", expanded=False):
+        extract_msg_status = parser_status.get("extract_msg", {})
+        mailparser_status = parser_status.get("mailparser", {})
+        
+        if extract_msg_status.get("available"):
+            st.success("✅ MSG Parser: Available")
+        else:
+            st.warning("⚠️ MSG Parser: Missing `extract-msg` package")
+            st.caption("Install with: `pip install extract-msg`")
+        
+        if mailparser_status.get("available"):
+            st.success("✅ EML Fallback: Available")
+        else:
+            st.info("ℹ️ EML Fallback: Optional `mailparser` not installed")
+            st.caption("Install for better EML parsing: `pip install mail-parser`")
+    
     snapshot = _resource_snapshot(str(PROJECT_ROOT), state.config.database_url)
     with st.sidebar.expander("Resource Usage", expanded=False):
         col_cpu, col_mem = st.columns(2)

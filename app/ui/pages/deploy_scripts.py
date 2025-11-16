@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 import shutil
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import streamlit as st
 
@@ -14,8 +14,10 @@ from app.services.powershell import (
     PowerShellScriptError,
     PowerShellRunResult,
     PowerShellScriptInfo,
+    launch_powershell_window,
     load_manifest,
     run_powershell_script,
+    stream_powershell_script,
 )
 from app.ui.state import AppState
 
@@ -26,6 +28,87 @@ def _persist_uploaded_script(upload, target_dir: Path) -> Path:
     with destination.open("wb") as f:
         shutil.copyfileobj(upload, f)
     return destination
+
+
+@st.fragment
+def _execute_script_fragment(
+    state: AppState,
+    selected_script: Path,
+    manifest_info: Optional[PowerShellScriptInfo],
+    argument_list: list[str],
+    working_path: Optional[Path],
+    stream_output: bool,
+) -> Optional[PowerShellRunResult]:
+    log_state = state.get_fragment_state(
+        f"script_log::{selected_script.name}",
+        {"lines": []},
+    )
+    log_placeholder = st.empty()
+
+    def _append_line(chunk: str) -> None:
+        lines = log_state["lines"]
+        lines.append(chunk.rstrip("\n"))
+        log_state["lines"] = lines[-200:]
+        log_placeholder.code("\n".join(log_state["lines"]), language="powershell")
+
+    with st.status("Executing PowerShell script…", expanded=True) as status:
+        try:
+            if stream_output:
+                log_state["lines"] = []
+                result = stream_powershell_script(
+                    selected_script,
+                    arguments=argument_list,
+                    working_directory=working_path,
+                    on_chunk=_append_line,
+                )
+            else:
+                result = run_powershell_script(
+                    selected_script,
+                    arguments=argument_list,
+                    working_directory=working_path,
+                )
+        except PowerShellNotAvailableError as exc:
+            status.update(label="PowerShell not available", state="error")
+            st.error(str(exc))
+            return None
+        except PowerShellScriptError as exc:
+            status.update(label="Script execution timed out", state="error")
+            st.error(str(exc))
+            return None
+        except FileNotFoundError as exc:
+            status.update(label="Script not found", state="error")
+            st.error(str(exc))
+            return None
+
+    summary_message = (
+        f"Script completed in {result.duration_seconds:.2f}s (exit code {result.exit_code})."
+    )
+    if result.succeeded:
+        st.success(summary_message)
+    else:
+        st.error(summary_message)
+
+    if stream_output and log_state["lines"]:
+        st.code("\n".join(log_state["lines"]), language="powershell")
+    else:
+        st.markdown("**STDOUT**")
+        st.text(result.stdout or "<no output>")
+        if result.stderr:
+            st.markdown("**STDERR**")
+            st.text(result.stderr)
+
+    state.record_script_run(
+        {
+            "script": selected_script.name,
+            "display_name": manifest_info.display_name if manifest_info else selected_script.name,
+            "description": manifest_info.description if manifest_info else None,
+            "path": str(selected_script),
+            "working_directory": str(working_path) if working_path else None,
+            "arguments": argument_list,
+            "result": result,
+        }
+    )
+    return result
 
 
 def render(state: AppState) -> None:
@@ -77,27 +160,30 @@ def render(state: AppState) -> None:
 
     st.caption(f"Script path: `{selected_script}`")
 
-    args_key = f"script_args_{selected_name}"
-    if args_key not in st.session_state:
-        st.session_state[args_key] = manifest_info.default_arguments if manifest_info else ""
-
-    working_dir_key = f"script_workdir_{selected_name}"
-    if manifest_info:
-        default_workdir = manifest_info.resolved_working_directory(state.config)
-    else:
-        default_workdir = state.config.input_dir
-    if working_dir_key not in st.session_state:
-        st.session_state[working_dir_key] = str(default_workdir) if default_workdir else ""
+    default_workdir = (
+        manifest_info.resolved_working_directory(state.config)
+        if manifest_info
+        else state.config.input_dir
+    )
+    script_state = state.get_fragment_state(
+        f"deploy_script::{selected_name}",
+        {
+            "args": manifest_info.default_arguments if manifest_info else "",
+            "working_dir": str(default_workdir) if default_workdir else "",
+            "stream_output": True,
+            "launch_external": False,
+        },
+    )
 
     with st.expander("Other Settings", expanded=False):
-        st.text_input(
+        script_state["working_dir"] = st.text_input(
             "Working Directory",
-            key=working_dir_key,
+            value=script_state["working_dir"],
             help="Script runs with this working directory. Leave blank to inherit the app's process directory.",
         )
-        st.text_input(
+        script_state["args"] = st.text_input(
             "Script Arguments",
-            key=args_key,
+            value=script_state["args"],
             help="Arguments are split using Windows-style quoting. Leave blank for none.",
         )
 
@@ -113,13 +199,20 @@ def render(state: AppState) -> None:
             key=confirm_key,
         )
 
+    script_state["stream_output"] = st.checkbox(
+        "Stream output in-app (read-only)", value=script_state["stream_output"]
+    )
+    script_state["launch_external"] = st.checkbox(
+        "Launch in separate PowerShell window", value=script_state["launch_external"]
+    )
+
     disabled = False
     if manifest_info and manifest_info.requires_confirmation and not confirmation_ok:
         disabled = True
     run_button = st.button("Run Script", type="primary", disabled=disabled)
     if run_button:
-        arg_text = st.session_state.get(args_key, "")
-        working_dir_text = st.session_state.get(working_dir_key, "")
+        arg_text = script_state["args"]
+        working_dir_text = script_state["working_dir"]
 
         try:
             argument_list = shlex.split(arg_text, posix=False) if arg_text.strip() else []
@@ -136,52 +229,27 @@ def render(state: AppState) -> None:
                 st.error(f"Unable to prepare working directory '{working_dir_text}': {exc}")
                 return
 
-        with st.status("Executing PowerShell script…", expanded=True) as status:
+        if script_state["launch_external"]:
             try:
-                result = run_powershell_script(
+                launch_powershell_window(
                     selected_script,
                     arguments=argument_list,
                     working_directory=working_path,
                 )
-            except PowerShellNotAvailableError as exc:
-                status.update(label="PowerShell not available", state="error")
+                st.info("Script launched in a separate PowerShell window. Monitor the window for progress and close it when complete.")
+            except (PowerShellNotAvailableError, FileNotFoundError) as exc:
                 st.error(str(exc))
-                return
-            except PowerShellScriptError as exc:
-                status.update(label="Script execution timed out", state="error")
-                st.error(str(exc))
-                return
-            except FileNotFoundError as exc:
-                status.update(label="Script not found", state="error")
-                st.error(str(exc))
-                return
-
-        state.record_script_run(
-            {
-                "script": selected_script.name,
-                "display_name": manifest_info.display_name if manifest_info else selected_script.name,
-                "description": manifest_info.description if manifest_info else None,
-                "path": str(selected_script),
-                "working_directory": str(working_path) if working_path else None,
-                "arguments": argument_list,
-                "result": result,
-            }
+            return
+        result = _execute_script_fragment(
+            state,
+            selected_script,
+            manifest_info,
+            argument_list,
+            working_path,
+            script_state["stream_output"],
         )
-
-        summary_message = (
-            f"Script completed in {result.duration_seconds:.2f}s (exit code {result.exit_code})."
-        )
-        if result.succeeded:
-            st.success(summary_message)
-        else:
-            st.error(summary_message)
-
-        st.subheader("Script Output")
-        st.markdown("**STDOUT**")
-        st.text(result.stdout or "<no output>")
-        if result.stderr:
-            st.markdown("**STDERR**")
-            st.text(result.stderr)
+        if result is None:
+            return
 
     if state.script_runs:
         st.subheader("Run History (session)")

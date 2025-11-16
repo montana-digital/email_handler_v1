@@ -9,17 +9,26 @@ from html import escape
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from sqlalchemy.orm import Session
+
 from app.config import AppConfig
+from app.db.models import OriginalAttachment, OriginalEmail
 from app.utils import sha256_file
 
 
 def find_original_email_bytes(
+    session: Session,
     config: AppConfig,
     email_hash: str | None,
 ) -> tuple[str, bytes] | None:
     """Locate the original .eml/.msg file by hash."""
     if not email_hash:
         return None
+
+    stored = session.query(OriginalEmail).filter_by(email_hash=email_hash).one_or_none()
+    if stored:
+        file_name = stored.file_name or f"{email_hash}.eml"
+        return file_name, stored.content
 
     search_roots = [config.input_dir, config.output_dir]
     seen: set[Path] = set()
@@ -44,24 +53,44 @@ def find_original_email_bytes(
     return None
 
 
-def build_attachments_zip(attachments: Sequence[Mapping[str, Any]], *, prefix: str = "attachments") -> tuple[str, bytes] | None:
+def build_attachments_zip(
+    attachments: Sequence[Mapping[str, Any]],
+    *,
+    prefix: str = "attachments",
+    session: Session | None = None,
+    email_hash: str | None = None,
+) -> tuple[str, bytes] | None:
     """Bundle existing attachment files into a ZIP payload."""
     buffer = io.BytesIO()
     added = False
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for attachment in attachments:
-            storage_path = attachment.get("storage_path")
             file_name = attachment.get("file_name") or "attachment"
-            if not storage_path:
+            storage_path = attachment.get("storage_path")
+            content_bytes: bytes | None = attachment.get("payload")
+
+            if not content_bytes and session and email_hash:
+                stored = (
+                    session.query(OriginalAttachment)
+                    .filter_by(email_hash=email_hash, file_name=attachment.get("file_name"))
+                    .one_or_none()
+                )
+                if stored:
+                    content_bytes = stored.content
+
+            if not content_bytes and storage_path:
+                path = Path(storage_path)
+                if path.exists():
+                    try:
+                        content_bytes = path.read_bytes()
+                    except OSError:
+                        continue
+
+            if not content_bytes:
                 continue
-            path = Path(storage_path)
-            if not path.exists():
-                continue
-            try:
-                archive.write(path, arcname=file_name)
-                added = True
-            except OSError:
-                continue
+
+            archive.writestr(file_name, content_bytes)
+            added = True
     if not added:
         return None
     return f"{prefix}.zip", buffer.getvalue()

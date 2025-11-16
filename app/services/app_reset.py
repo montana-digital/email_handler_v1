@@ -26,7 +26,16 @@ def _clear_directory_contents(path: Path) -> None:
 
 def _sqlite_path(config: AppConfig) -> Path | None:
     if config.database_url.startswith("sqlite:///"):
-        return Path(config.database_url.replace("sqlite:///", "")).expanduser()
+        # Handle both forward and backward slashes, and resolve the path
+        path_str = config.database_url.replace("sqlite:///", "")
+        # Handle Windows paths with forward slashes
+        if path_str.startswith("/") and not Path(path_str).exists():
+            # Try converting /C:/path to C:/path
+            if len(path_str) > 2 and path_str[1] == ":":
+                path_str = path_str[1:]
+        path = Path(path_str).expanduser().resolve()
+        logger.debug("Resolved database path: %s (from URL: %s)", path, config.database_url)
+        return path
     return None
 
 
@@ -50,11 +59,58 @@ def reset_application(
     """Remove data according to the supplied flags."""
     if reset_database:
         db_path = _sqlite_path(config)
-        if db_path and db_path.exists():
-            try:
-                db_path.unlink()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to delete database file %s: %s", db_path, exc)
+        if not db_path:
+            logger.warning("Could not determine database path from URL: %s", config.database_url)
+            return
+        
+        logger.info("Attempting to delete database at: %s (exists: %s)", db_path, db_path.exists())
+        
+        if db_path.exists():
+            # Try multiple times to delete the database file
+            # SQLite may hold locks briefly after connections close
+            import time
+            max_attempts = 5
+            deleted = False
+            for attempt in range(max_attempts):
+                try:
+                    # Also delete SQLite WAL and SHM files if they exist
+                    wal_path = db_path.with_suffix(db_path.suffix + "-wal")
+                    shm_path = db_path.with_suffix(db_path.suffix + "-shm")
+                    
+                    logger.debug("Attempt %d/%d: Deleting database files", attempt + 1, max_attempts)
+                    
+                    # Delete WAL and SHM files first (they may be easier to delete)
+                    if wal_path.exists():
+                        try:
+                            wal_path.unlink()
+                            logger.info("Deleted WAL file: %s", wal_path)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to delete WAL file %s: %s", wal_path, exc)
+                    
+                    if shm_path.exists():
+                        try:
+                            shm_path.unlink()
+                            logger.info("Deleted SHM file: %s", shm_path)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to delete SHM file %s: %s", shm_path, exc)
+                    
+                    # Now delete the main database file
+                    db_path.unlink()
+                    deleted = True
+                    logger.info("Database file deleted successfully: %s", db_path)
+                    break
+                except PermissionError as exc:
+                    if attempt < max_attempts - 1:
+                        logger.debug("Database file locked, retrying in 0.5s (attempt %d/%d): %s", attempt + 1, max_attempts, exc)
+                        time.sleep(0.5)
+                    else:
+                        logger.error("Failed to delete database file %s after %d attempts: file is locked - %s", db_path, max_attempts, exc)
+                        raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Failed to delete database file %s: %s", db_path, exc)
+                    raise
+        else:
+            logger.info("Database file does not exist at %s, nothing to delete", db_path)
 
     directories: list[Path] = []
     if reset_cache:

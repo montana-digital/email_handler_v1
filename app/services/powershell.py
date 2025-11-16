@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import shlex
 import shutil
 import subprocess
@@ -10,7 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Mapping, Sequence
+from typing import Callable, Dict, Mapping, Sequence
 
 from loguru import logger
 
@@ -222,4 +223,127 @@ def run_powershell_script(
         )
 
     return result
+
+
+def stream_powershell_script(
+    script_path: Path,
+    *,
+    arguments: Sequence[str] | None = None,
+    timeout_seconds: int | None = None,
+    execution_policy: str = "Bypass",
+    powershell_path: str | None = None,
+    working_directory: Path | None = None,
+    on_chunk: Callable[[str], None] | None = None,
+) -> PowerShellRunResult:
+    """Execute a PowerShell script while streaming stdout back to a callback."""
+    resolved_script = script_path.resolve()
+    if resolved_script.suffix.lower() != ".ps1":
+        raise ValueError(f"Unsupported script type: {resolved_script}")
+    if not resolved_script.exists():
+        raise FileNotFoundError(f"PowerShell script not found: {resolved_script}")
+
+    shell_executable = _resolve_powershell_executable(powershell_path)
+    command = [
+        shell_executable,
+        "-ExecutionPolicy",
+        execution_policy,
+        "-File",
+        str(resolved_script),
+    ]
+    if arguments:
+        command.extend(arguments)
+
+    started_at = datetime.now(timezone.utc)
+    start = time.monotonic()
+
+    logger.info(
+        "Streaming PowerShell script: {} (cwd={})",
+        shlex.join(command),
+        working_directory or "default",
+    )
+
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=str(working_directory) if working_directory else None,
+        )
+    except FileNotFoundError as exc:
+        logger.exception("Failed to start PowerShell script {}", resolved_script)
+        raise PowerShellNotAvailableError(str(exc)) from exc
+
+    collected: list[str] = []
+    try:
+        if process.stdout:
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                collected.append(line)
+                if on_chunk:
+                    on_chunk(line)
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        logger.error("PowerShell script timed out while streaming: {}", resolved_script)
+        raise PowerShellScriptError("Script timed out while streaming output.")
+
+    finished_at = datetime.now(timezone.utc)
+    duration_seconds = time.monotonic() - start
+
+    result = PowerShellRunResult(
+        command=command,
+        exit_code=process.returncode,
+        stdout="".join(collected),
+        stderr="",
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_seconds=duration_seconds,
+    )
+
+    if result.succeeded:
+        logger.info("Streaming PowerShell script completed: {}", resolved_script)
+    else:
+        logger.warning("Streaming PowerShell script exited with %s: %s", result.exit_code, resolved_script)
+    return result
+
+
+def launch_powershell_window(
+    script_path: Path,
+    *,
+    arguments: Sequence[str] | None = None,
+    execution_policy: str = "Bypass",
+    powershell_path: str | None = None,
+    working_directory: Path | None = None,
+) -> None:
+    """Launch script in a detached PowerShell window (no output captured)."""
+    resolved_script = script_path.resolve()
+    if resolved_script.suffix.lower() != ".ps1":
+        raise ValueError(f"Unsupported script type: {resolved_script}")
+    if not resolved_script.exists():
+        raise FileNotFoundError(f"PowerShell script not found: {resolved_script}")
+
+    shell_executable = _resolve_powershell_executable(powershell_path)
+    command = [
+        shell_executable,
+        "-NoExit",
+        "-ExecutionPolicy",
+        execution_policy,
+        "-File",
+        str(resolved_script),
+    ]
+    if arguments:
+        command.extend(arguments)
+
+    creationflags = 0
+    if platform.system() == "Windows":
+        creationflags = subprocess.CREATE_NEW_CONSOLE  # type: ignore[attr-defined]
+
+    subprocess.Popen(
+        command,
+        cwd=str(working_directory) if working_directory else None,
+        creationflags=creationflags,
+    )
 

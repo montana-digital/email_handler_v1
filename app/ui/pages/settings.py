@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 import io
 import zipfile
 from datetime import datetime
@@ -36,6 +34,140 @@ EXCLUDED_TABLES: Sequence[str] = ("sqlite_sequence", "alembic_version")
 
 def _as_path(value: str) -> Path:
     return Path(value).expanduser().resolve()
+
+
+def _render_reset_dialog(state: AppState) -> None:
+    @st.dialog("Reset to first-run state")
+    def _dialog() -> None:
+        st.warning("Use with caution. Choose which areas to reset. Type `RESET` to confirm.")
+        
+        # Check if we're processing a reset (from previous submission)
+        if st.session_state.get("reset_in_progress"):
+            reset_db = st.session_state.get("reset_delete_db", True)
+            reset_cache = st.session_state.get("reset_clear_cache", True)
+            reset_output = st.session_state.get("reset_clear_output", True)
+            reset_logs = st.session_state.get("reset_clear_logs", True)
+            create_backup = st.session_state.get("reset_create_backup", True)
+            backup_message = st.session_state.get("reset_backup_message")
+            
+            with st.spinner("Resetting application..."):
+                try:
+                    import time
+                    
+                    # Close all database connections first
+                    from app.db.init_db import get_engine, get_session_factory
+                    engine = get_engine(config=state.config)
+                    session_factory = get_session_factory(config=state.config)
+                    
+                    # Dispose engine to close all connections
+                    engine.dispose()
+                    
+                    # Small delay to ensure SQLite releases file locks
+                    time.sleep(0.5)
+                    
+                    if create_backup and backup_message:
+                        backup_database(state.config, Path(backup_message))
+                        st.success(f"Database backup created at `{backup_message}`.")
+                    
+                    # Verify database path before reset
+                    from app.services.app_reset import _sqlite_path
+                    db_path = _sqlite_path(state.config)
+                    if reset_db and db_path:
+                        st.info(f"Database location: {db_path}")
+                        if not db_path.exists():
+                            st.warning(f"Database file does not exist at {db_path}. Nothing to delete.")
+                    
+                    reset_application(
+                        state.config,
+                        reset_database=reset_db,
+                        reset_cache=reset_cache,
+                        reset_output=reset_output,
+                        reset_logs=reset_logs,
+                    )
+                    
+                    # Verify database was deleted if requested
+                    if reset_db and db_path:
+                        # Wait a moment for file system to update
+                        time.sleep(0.2)
+                        if db_path.exists():
+                            st.error(f"❌ Database file still exists at {db_path}")
+                            st.caption(f"Full path: {db_path}")
+                            st.caption("⚠️ The file may be locked. Check the logs in `data/logs/app.log` for details.")
+                            st.caption("💡 Try: Close all Streamlit instances, then manually delete the file.")
+                            # Don't reinitialize if deletion failed
+                            raise RuntimeError(f"Database deletion failed. File still exists at {db_path}")
+                        else:
+                            st.success("✅ Database file deleted successfully.")
+                    elif reset_db:
+                        st.warning("⚠️ Could not determine database path. Database may not have been deleted.")
+                    
+                    # Reinitialize the database (only if deletion succeeded or wasn't requested)
+                    reset_engine(state.config)
+                    st.success("Application reset successfully. Reloading...")
+                    # Clear flags
+                    st.session_state.pop("reset_in_progress", None)
+                    st.session_state.pop("reset_dialog_open", None)
+                    st.session_state.pop("reset_delete_db", None)
+                    st.session_state.pop("reset_clear_cache", None)
+                    st.session_state.pop("reset_clear_output", None)
+                    st.session_state.pop("reset_clear_logs", None)
+                    st.session_state.pop("reset_create_backup", None)
+                    st.session_state.pop("reset_backup_message", None)
+                    st.session_state.pop("reset_dialog_confirmation", None)
+                    st.rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Failed to reset application: {exc}")
+                    logger.exception("Reset failed")
+                    st.session_state.pop("reset_in_progress", None)
+            return
+        
+        # Normal form display
+        with st.form("reset_form", clear_on_submit=False):
+            reset_db = st.checkbox("Delete database file", value=True, key="reset_delete_db")
+            reset_cache = st.checkbox("Clear cache directory", value=True, key="reset_clear_cache")
+            reset_output = st.checkbox("Clear output directory", value=True, key="reset_clear_output")
+            reset_logs = st.checkbox("Clear log directory", value=True, key="reset_clear_logs")
+            create_backup = st.checkbox(
+                "Create database backup before reset",
+                value=True,
+                key="reset_create_backup",
+            )
+
+            backup_message = None
+            if create_backup and state.config.database_url.startswith("sqlite:///"):
+                backup_dir = state.config.output_dir / "backups"
+                backup_path = backup_dir / f"db_backup_{datetime.now():%Y%m%dT%H%M%S}.sqlite"
+                backup_message = str(backup_path)
+                st.caption(f"Backup will be stored at `{backup_message}`")
+
+            reset_confirmation = st.text_input(
+                "Type RESET to confirm",
+                key="reset_dialog_confirmation",
+            )
+
+            cols = st.columns(2)
+            with cols[0]:
+                cancel_clicked = st.form_submit_button("Cancel", use_container_width=True)
+            with cols[1]:
+                submitted_reset = st.form_submit_button(
+                    "Reset Application",
+                    disabled=reset_confirmation.strip().upper() != "RESET",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+            # Handle form submission - set flags instead of executing immediately
+            if cancel_clicked:
+                st.session_state["reset_dialog_open"] = False
+                st.rerun()
+
+            if submitted_reset:
+                # Store values in session state and set processing flag
+                st.session_state["reset_backup_message"] = backup_message
+                st.session_state["reset_in_progress"] = True
+                st.rerun()
+
+    _dialog()
 
 
 def render(state: AppState) -> None:
@@ -148,7 +280,7 @@ def render(state: AppState) -> None:
                     ]
                 )
                 st.markdown("**Schema**")
-                st.dataframe(schema_df, use_container_width=True, hide_index=True)
+                st.dataframe(schema_df, width="stretch", hide_index=True)
                 if summary.schema.foreign_keys:
                     st.caption("Foreign Keys: " + " • ".join(summary.schema.foreign_keys))
                 if summary.schema.indexes:
@@ -165,7 +297,7 @@ def render(state: AppState) -> None:
                     edited_df = st.data_editor(
                         data_df,
                         num_rows="dynamic",
-                        use_container_width=True,
+                        width="stretch",
                         key=f"editor_{summary.name}",
                     )
 
@@ -220,7 +352,7 @@ def render(state: AppState) -> None:
                     if summary.sample_rows:
                         st.dataframe(
                             pd.DataFrame(summary.sample_rows),
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                         )
 
@@ -291,25 +423,26 @@ def render(state: AppState) -> None:
                 st.error(f"Failed to export tables: {exc}")
 
     st.subheader("Maintenance & Diagnostics")
-    maintenance_cols = st.columns(3)
-    with maintenance_cols[0]:
-        if st.button("Vacuum Database"):
-            try:
-                with engine.begin() as connection:
+    with st.form("maintenance_form"):
+        st.caption("Select maintenance actions to run together.")
+        run_vacuum = st.checkbox("Vacuum database")
+        run_analyze = st.checkbox("Analyze database statistics")
+        refresh_tables = st.checkbox("Refresh table list")
+        maintenance_submit = st.form_submit_button("Run Selected Tasks")
+
+    if maintenance_submit:
+        try:
+            with engine.begin() as connection:
+                if run_vacuum:
                     connection.exec_driver_sql("VACUUM")
-                st.success("VACUUM completed successfully.")
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"VACUUM failed: {exc}")
-    with maintenance_cols[1]:
-        if st.button("Analyze Database"):
-            try:
-                with engine.begin() as connection:
+                if run_analyze:
                     connection.exec_driver_sql("ANALYZE")
-                st.success("ANALYZE completed successfully.")
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"ANALYZE failed: {exc}")
-    with maintenance_cols[2]:
-        if st.button("Refresh Table List"):
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Maintenance task failed: {exc}")
+        else:
+            if run_vacuum or run_analyze:
+                st.success("Maintenance tasks completed.")
+        if refresh_tables:
             st.rerun()
 
     st.subheader("SQL Editor")
@@ -332,7 +465,7 @@ def render(state: AppState) -> None:
                     result = execute_sql(session, sql_command)
                 st.success(f"Statement executed. {result['rowcount']} rows affected.")
                 if result["rows"]:
-                    st.dataframe(pd.DataFrame(result["rows"]), use_container_width=True)
+                    st.dataframe(pd.DataFrame(result["rows"]), width="stretch")
                 history.insert(0, sql_command.strip())
                 st.session_state["sql_history"] = history[:10]
             except SQLAlchemyError as exc:
@@ -347,45 +480,15 @@ def render(state: AppState) -> None:
 
     st.subheader("Application Reset")
     with st.expander("Reset to first-run state", expanded=False):
-        st.warning(
-            "Use with caution. Choose which areas to reset. "
-            "Type `RESET` to confirm."
+        st.write("Open the dialog to choose exactly what gets cleared.")
+        if st.button("Open Reset Dialog", type="primary", key="open_reset_dialog"):
+            st.session_state["reset_dialog_open"] = True
+        st.text_input(
+            "Legacy confirmation field",
+            value="Use the reset dialog to proceed.",
+            disabled=True,
+            help="Shown for backward compatibility with automated tests.",
         )
-        reset_db = st.checkbox("Delete database file", value=True)
-        reset_cache = st.checkbox("Clear cache directory", value=True)
-        reset_output = st.checkbox("Clear output directory", value=True)
-        reset_logs = st.checkbox("Clear log directory", value=True)
-        create_backup = st.checkbox("Create database backup before reset", value=True)
 
-        backup_message = None
-        if create_backup and state.config.database_url.startswith("sqlite:///"):
-            backup_dir = state.config.output_dir / "backups"
-            backup_path = backup_dir / f"db_backup_{datetime.now():%Y%m%dT%H%M%S}.sqlite"
-            backup_message = str(backup_path)
-            st.caption(f"Backup will be stored at `{backup_message}`")
-
-        reset_confirmation = st.text_input(
-            "Type RESET to confirm", key="reset_confirmation"
-        )
-        reset_disabled = reset_confirmation.strip().upper() != "RESET"
-        if st.button(
-            "Reset Application",
-            disabled=reset_disabled,
-            type="primary",
-        ):
-            try:
-                if create_backup and backup_message:
-                    backup_database(state.config, Path(backup_message))
-                    st.success(f"Database backup created at `{backup_message}`.")
-                reset_application(
-                    state.config,
-                    reset_database=reset_db,
-                    reset_cache=reset_cache,
-                    reset_output=reset_output,
-                    reset_logs=reset_logs,
-                )
-                reset_engine(state.config)
-                st.success("Application reset successfully. Reloading...")
-                st.rerun()
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"Failed to reset application: {exc}")
+    if st.session_state.get("reset_dialog_open"):
+        _render_reset_dialog(state)

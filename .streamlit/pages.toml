@@ -1,0 +1,30 @@
+[[pages]]
+path = "Home.py"
+name = "Home"
+icon = "🏠"
+
+[[pages]]
+path = "pages/01_Deploy_Scripts.py"
+name = "Deploy Scripts"
+icon = "📜"
+
+[[pages]]
+path = "pages/02_Settings.py"
+name = "Settings"
+icon = "⚙️"
+
+[[pages]]
+path = "pages/03_Email_Display.py"
+name = "Email Display"
+icon = "📥"
+
+[[pages]]
+path = "pages/04_Attachments.py"
+name = "Attachments"
+icon = "🗂️"
+
+[[pages]]
+path = "pages/05_Database_Display.py"
+name = "Database Display"
+icon = "📊"
+

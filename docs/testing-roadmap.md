@@ -19,9 +19,9 @@ This document tracks the strategy, tooling, and action items for validating **Em
 
 | Asset | Location | Description | Status |
 |-------|----------|-------------|--------|
-| Email corpus generator | `scripts/generate_test_dataset.py` | Produce ≥220 `.eml` messages with metadata variations. 60% subjects include `External Info - TEAM`. Include malformed headers, duplicates, multi-part content. | TODO |
+| Email corpus generator | `scripts/generate_test_dataset.py` | Produce ≥220 `.eml` messages with metadata variations. 60% subjects include `External Info - TEAM`. Include malformed headers, duplicates, multi-part content. | ✅ DONE (script generates emails + attachments + manifest) |
 | Attachment generator | `tests/data/attachments/<email-hash>/` | Provide mix of image, HTML, CSV, PDF, DOCX, ZIP, MSG, large binaries. Validate duplicate names & size edge cases. | TODO |
-| PowerShell samples | `tests/data/scripts/` | `noop.ps1`, `bulk_copy.ps1`, `log_env.ps1`, `slow_script.ps1` with manifest metadata. | TODO |
+| PowerShell samples | `tests/data/scripts/` | `noop.ps1`, `bulk_copy.ps1`, `log_env.ps1`, `slow_script.ps1` with manifest metadata. | ✅ DONE (auto-generated alongside dataset) |
 | DB seed snapshots | `tests/data/db/*.sqlite` | Pre-populate DB variants for targeted tests (optional). | TODO |
 
 ### Email fields to randomize

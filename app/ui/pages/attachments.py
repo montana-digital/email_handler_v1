@@ -120,7 +120,7 @@ def render(state: AppState) -> None:
         ]
     )
     st.caption(f"Showing {len(page_records)} of {total_records} attachments (page {current_page}/{total_pages}).")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 
     selected_ids = st.multiselect(
         "Select attachments to export",
