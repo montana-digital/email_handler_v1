@@ -46,3 +46,9 @@ dist/
 *.tar
 *.gz
 
+# Assets (explicitly allow logo and other assets)
+!assets/
+!assets/**
+!**/logo.*
+!**/*logo*
+
