@@ -126,7 +126,8 @@ def test_parse_msg_with_html_table(monkeypatch, tmp_path):
     parsed = parser_email.parse_msg_file(msg_path)
 
     # Verify fields were extracted from HTML table
-    assert parsed.subject_id == "Alert-2025"
+    # Subject ID should be from Date Reported (YYYYMMDDTHHMMSS), not from body "Subject:" field
+    assert parsed.subject_id == "20251112T195438"
     assert parsed.date_reported is not None
     assert parsed.sending_source_raw == "888-111-1111"
     assert parsed.urls_parsed == ["example.com"]
@@ -164,7 +165,8 @@ def test_parse_msg_with_html_only_body(monkeypatch, tmp_path):
     parsed = parser_email.parse_msg_file(msg_path)
 
     # Should extract fields from HTML
-    assert parsed.subject_id == "Test-Alert"
+    # Subject ID should be from Date Reported (YYYYMMDDTHHMMSS), not from body "Subject:" field
+    assert parsed.subject_id == "20251112T195438"
     assert parsed.date_reported is not None
     assert parsed.sending_source_raw == "https://phish.example.com"
     assert parsed.body_html is not None

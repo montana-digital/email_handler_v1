@@ -6,7 +6,7 @@ import json
 import pickle
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 from dataclasses import dataclass
 from loguru import logger
@@ -77,7 +77,15 @@ def _apply_parsed_email(target: InputEmail, parsed) -> None:
     target.model_confidence = parsed.model_confidence
     target.message_id = parsed.message_id
     target.image_base64 = parsed.image_base64
-    target.body_html = parsed.body_html or parsed.body_text
+    # Store full email body as HTML - prefer HTML, but if only text available, preserve it
+    # The body_html field should contain the complete email body content
+    if parsed.body_html:
+        target.body_html = parsed.body_html
+    elif parsed.body_text:
+        # If only text is available, wrap it in basic HTML to preserve formatting
+        target.body_html = f"<pre>{parsed.body_text}</pre>"
+    else:
+        target.body_html = None
 
 
 def _build_failed_email_stub(email_hash: str, file_name: str, error: str) -> InputEmail:
@@ -203,6 +211,7 @@ def ingest_emails(
     config: Optional[AppConfig] = None,
     source_paths: Optional[Sequence[Path]] = None,
     batch_name: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> Optional[IngestionResult]:
     """Process emails from the configured input directory into SQLite and cache."""
     cfg = config or load_config()
@@ -214,6 +223,7 @@ def ingest_emails(
         logger.info("No email files discovered for ingestion.")
         return None
 
+    total_files = len(files)
     ingested_emails: List[InputEmail] = []
     skipped: List[str] = []
     failures: List[str] = []
@@ -222,7 +232,10 @@ def ingest_emails(
     MAX_EMAIL_SIZE = 50 * 1024 * 1024  # 50MB
     MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024  # 10MB
     
-    for file_path in files:
+    for idx, file_path in enumerate(files, 1):
+        # Update progress
+        if progress_callback:
+            progress_callback(idx, total_files, file_path.name)
         try:
             # Check file size before reading
             file_size = file_path.stat().st_size

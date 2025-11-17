@@ -24,12 +24,13 @@ from app.services.email_records import (
     get_emails_for_batch,
     update_email_record,
 )
-from app.services.ingestion import ingest_emails
+from app.services.ingestion import _discover_email_files, ingest_emails
 from app.services.parsing import parser_capabilities
 from app.services.reparse import reparse_email
 from app.services.reporting import generate_email_report
 from app.services.standard_emails import promote_to_standard_emails
 from app.ui.state import AppState
+from app.ui.utils.images import display_image_with_dialog, process_html_images
 
 
 def _input_counts(input_dir: Path) -> tuple[int, int]:
@@ -59,8 +60,11 @@ def _has_custom_background(body_html: str) -> bool:
 
 
 def _render_email_body(body_html: str) -> None:
-    if _has_custom_background(body_html):
-        html(body_html, height=500, scrolling=True)
+    # Process HTML to convert images to thumbnails
+    processed_html = process_html_images(body_html)
+    
+    if _has_custom_background(processed_html):
+        html(processed_html, height=500, scrolling=True)
     else:
         wrapped = f"""
         <div style="
@@ -70,7 +74,7 @@ def _render_email_body(body_html: str) -> None:
             border-radius: 12px;
             box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
         ">
-        {body_html}
+        {processed_html}
         </div>
         """
         html(wrapped, height=500, scrolling=True)
@@ -134,40 +138,68 @@ def _render_ingestion_panel(state: AppState) -> None:
     col_ingest, col_refresh = st.columns([1, 1])
     with col_ingest:
         if st.button("Ingest New Emails", width="stretch"):
-            with session_scope() as session:
-                result = ingest_emails(session, config=state.config)
-            if result is None:
+            # Discover files first to get count
+            files = _discover_email_files(state.config.input_dir)
+            total_files = len(files)
+            
+            if total_files == 0:
                 st.info("No new emails found in the input directory.")
             else:
-                if result.skipped:
-                    skipped_preview = "\n".join(result.skipped[:5])
-                    more = ""
-                    if len(result.skipped) > 5:
-                        more = f"\n...and {len(result.skipped) - 5} more."
-                    st.warning(
-                        "Some files could not be ingested:\n"
-                        f"{skipped_preview}{more}\n"
-                        "Check that optional dependencies (e.g., `extract-msg`) are installed and that the files are valid."
+                # Create progress bar and status
+                progress_bar = st.progress(0)
+                status_container = st.empty()
+                
+                def update_progress(current: int, total: int, file_name: str) -> None:
+                    """Update progress bar and status during ingestion."""
+                    progress = current / total if total > 0 else 0
+                    progress_bar.progress(progress)
+                    status_container.info(
+                        f"Processing email {current} of {total}: **{file_name}**"
                     )
-                if result.failures:
-                    failure_preview = "\n".join(result.failures[:5])
-                    more_failures = ""
-                    if len(result.failures) > 5:
-                        more_failures = f"\n...and {len(result.failures) - 5} more."
-                    st.warning(
-                        "Some emails were stored but could not be fully parsed yet:\n"
-                        f"{failure_preview}{more_failures}\n"
-                        "You can retry parsing them after installing optional parsers."
+                
+                with session_scope() as session:
+                    result = ingest_emails(
+                        session,
+                        config=state.config,
+                        progress_callback=update_progress,
                     )
+                
+                # Clear progress indicators
+                progress_bar.empty()
+                status_container.empty()
+                
+                if result is None:
+                    st.info("No new emails found in the input directory.")
+                else:
+                    if result.skipped:
+                        skipped_preview = "\n".join(result.skipped[:5])
+                        more = ""
+                        if len(result.skipped) > 5:
+                            more = f"\n...and {len(result.skipped) - 5} more."
+                        st.warning(
+                            "Some files could not be ingested:\n"
+                            f"{skipped_preview}{more}\n"
+                            "Check that optional dependencies (e.g., `extract-msg`) are installed and that the files are valid."
+                        )
+                    if result.failures:
+                        failure_preview = "\n".join(result.failures[:5])
+                        more_failures = ""
+                        if len(result.failures) > 5:
+                            more_failures = f"\n...and {len(result.failures) - 5} more."
+                        st.warning(
+                            "Some emails were stored but could not be fully parsed yet:\n"
+                            f"{failure_preview}{more_failures}\n"
+                            "You can retry parsing them after installing optional parsers."
+                        )
 
-                if result.batch and result.email_ids:
-                    batch = result.batch
-                    email_ids = result.email_ids
-                    state.add_notification(f"Ingested {len(email_ids)} emails into {batch.batch_name}")
-                    st.success(f"Ingested {len(email_ids)} emails into '{batch.batch_name}'.")
-                    st.rerun()
-                elif not result.email_ids and not result.batch:
-                    st.info("No new emails were saved. See warnings above for skipped files.")
+                    if result.batch and result.email_ids:
+                        batch = result.batch
+                        email_ids = result.email_ids
+                        state.add_notification(f"Ingested {len(email_ids)} emails into {batch.batch_name}")
+                        st.success(f"Ingested {len(email_ids)} emails into '{batch.batch_name}'.")
+                        st.rerun()
+                    elif not result.email_ids and not result.batch:
+                        st.info("No new emails were saved. See warnings above for skipped files.")
     with col_refresh:
         if st.button("Refresh Batches", width="stretch"):
             st.rerun()
@@ -234,9 +266,10 @@ def _render_batch_panel(state: AppState) -> None:
         exclude_text = st.text_input("Exclude records containing", key="exclude_filter").strip()
         sort_column = st.selectbox(
             "Sort by",
-            options=["Subject", "Sender", "Date Sent", "Subject ID"],
+            options=["ID", "Subject", "Sender", "Date Sent", "Subject ID"],
+            index=0,  # Default to ID
         )
-        sort_order = st.selectbox("Sort order", options=["Ascending", "Descending"])
+        sort_order = st.selectbox("Sort order", options=["Ascending", "Descending"], index=0)  # Default to Ascending
 
     accessor = column_accessors[selected_column]
     if include_text:
@@ -251,6 +284,7 @@ def _render_batch_panel(state: AppState) -> None:
         ]
 
     sort_key_map = {
+        "ID": lambda record: record["id"] or 0,
         "Subject": lambda record: (record["subject"] or "").lower(),
         "Sender": lambda record: (record["sender"] or "").lower(),
         "Date Sent": lambda record: record["date_sent"] or "",
@@ -289,19 +323,72 @@ def _render_batch_panel(state: AppState) -> None:
     st.dataframe(pd.DataFrame(table_rows), width="stretch", hide_index=True)
 
     available_ids = [row["ID"] for row in table_rows]
+    
+    # Create lookup dictionary for email details (for informative labels)
+    # Use all filtered records, not just current page, for better label support
+    email_lookup = {record["id"]: record for record in filtered}
+    
+    def format_email_label(email_id: int) -> str:
+        """Format email label with Subject ID, URLs, and callback numbers."""
+        email = email_lookup.get(email_id)
+        if not email:
+            return f"Email #{email_id}"
+        
+        parts = [f"#{email_id}"]
+        
+        # Add Subject ID
+        if email.get("subject_id"):
+            parts.append(f"ID: {email['subject_id']}")
+        
+        # Add URLs (first URL, truncated if long)
+        urls = email.get("urls_parsed", [])
+        if urls:
+            url_display = urls[0][:40] + "..." if len(urls[0]) > 40 else urls[0]
+            if len(urls) > 1:
+                url_display += f" (+{len(urls)-1})"
+            parts.append(f"URLs: {url_display}")
+        
+        # Add Callback Numbers (first 2)
+        callbacks = email.get("callback_numbers_parsed", [])
+        if callbacks:
+            callback_display = ", ".join(callbacks[:2])
+            if len(callbacks) > 2:
+                callback_display += f" (+{len(callbacks)-2})"
+            parts.append(f"Callbacks: {callback_display}")
+        
+        return " | ".join(parts)
 
     if "report_artifacts" not in st.session_state:
         st.session_state["report_artifacts"] = None
 
+    # Initialize report selection in session state if not exists
+    if "report_selection" not in st.session_state:
+        st.session_state["report_selection"] = available_ids.copy() if available_ids else []
+    
+    # Add/Remove all buttons for report selection
+    report_button_cols = st.columns([1, 1, 2])
+    with report_button_cols[0]:
+        if st.button("Add All", key="report_add_all", use_container_width=True):
+            st.session_state["report_selection"] = available_ids.copy() if available_ids else []
+            st.rerun()
+    with report_button_cols[1]:
+        if st.button("Remove All", key="report_remove_all", use_container_width=True):
+            st.session_state["report_selection"] = []
+            st.rerun()
+    
+    # Get current selection from session state (will be updated by widget)
+    current_selection = st.session_state.get("report_selection", available_ids.copy() if available_ids else [])
+    
     report_selection = st.multiselect(
         "Emails to include in HTML report",
         options=available_ids,
-        default=available_ids,
-        format_func=lambda record_id: f"Email #{record_id}",
+        default=current_selection,
+        format_func=format_email_label,
         key="report_selection",
     )
-
-    finalize_col, report_col, promote_col = st.columns([1, 1, 2])
+    
+    # Note: st.session_state["report_selection"] is automatically updated by the widget
+    # No need to manually update it here
 
     finalize_col, report_col, promote_col = st.columns([1, 1, 2])
 
@@ -398,13 +485,34 @@ def _render_batch_panel(state: AppState) -> None:
                             key=f"download_zip_emails_{path_obj.stem}",
                         )
 
+    # Initialize promotion selection in session state if not exists
+    if "promotion_selection" not in st.session_state:
+        st.session_state["promotion_selection"] = available_ids.copy() if available_ids else []
+    
+    # Add/Remove all buttons
+    promotion_button_cols = st.columns([1, 1, 2])
+    with promotion_button_cols[0]:
+        if st.button("Add All", key="promotion_add_all", use_container_width=True):
+            st.session_state["promotion_selection"] = available_ids.copy() if available_ids else []
+            st.rerun()
+    with promotion_button_cols[1]:
+        if st.button("Remove All", key="promotion_remove_all", use_container_width=True):
+            st.session_state["promotion_selection"] = []
+            st.rerun()
+    
+    # Get current selection from session state (will be updated by widget)
+    current_promotion_selection = st.session_state.get("promotion_selection", available_ids.copy() if available_ids else [])
+    
     promotion_selection = st.multiselect(
         "Emails to promote to Standard Emails",
         options=available_ids,
-        default=[],
-        format_func=lambda record_id: f"Email #{record_id}",
+        default=current_promotion_selection,
+        format_func=format_email_label,
         key="promotion_selection",
     )
+    
+    # Note: st.session_state["promotion_selection"] is automatically updated by the widget
+    # No need to manually update it here
 
     if promote_col.button("Promote to Standard Emails", disabled=not promotion_selection, width="stretch"):
         with session_scope() as session:
@@ -427,15 +535,40 @@ def _render_batch_panel(state: AppState) -> None:
                 st.warning(f"Email #{result.email_id} skipped: {result.reason or 'Duplicate record.'}")
 
     if state.selected_email_id not in available_ids:
-        state.selected_email_id = available_ids[0]
-
-    selected_email_id = st.selectbox(
-        "Select email for detail view",
-        options=available_ids,
-        index=available_ids.index(state.selected_email_id),
-        format_func=lambda record_id: f"Email #{record_id}",
-    )
-    state.selected_email_id = selected_email_id
+        state.selected_email_id = available_ids[0] if available_ids else None
+    
+    if not available_ids:
+        st.info("No emails available in this batch.")
+        return
+    
+    # Email navigation with Previous/Next buttons
+    nav_col1, nav_col2, nav_col3 = st.columns([1, 3, 1])
+    
+    with nav_col1:
+        current_index = available_ids.index(state.selected_email_id) if state.selected_email_id in available_ids else 0
+        if st.button("◀ Previous", disabled=current_index == 0, use_container_width=True):
+            if current_index > 0:
+                state.selected_email_id = available_ids[current_index - 1]
+                st.rerun()
+    
+    with nav_col2:
+        selected_email_id = st.selectbox(
+            "Select email for detail view",
+            options=available_ids,
+            index=current_index,
+            format_func=format_email_label,
+            key="email_detail_selectbox",
+        )
+        state.selected_email_id = selected_email_id
+    
+    with nav_col3:
+        if st.button("Next ▶", disabled=current_index >= len(available_ids) - 1, use_container_width=True):
+            if current_index < len(available_ids) - 1:
+                state.selected_email_id = available_ids[current_index + 1]
+                st.rerun()
+    
+    # Display current position
+    st.caption(f"Email {current_index + 1} of {len(available_ids)}")
 
     with session_scope() as session:
         email_detail = get_email_detail(session, state.selected_email_id)
@@ -514,12 +647,11 @@ def _render_batch_panel(state: AppState) -> None:
                     st.write(f"**{file_name}** — {file_type or 'unknown'}, {file_size} bytes")
 
                     if file_path.exists() and file_type.startswith("image"):
-                        try:
-                            with file_path.open("rb") as fh:
-                                Image.open(fh)
-                            st.image(str(file_path), caption=file_name, width="stretch")
-                        except UnidentifiedImageError:
-                            st.info("Preview not available for this attachment type.")
+                        display_image_with_dialog(
+                            image_path=file_path,
+                            caption=file_name,
+                            key=f"attachment_{attachment.get('id')}",
+                        )
 
                     if file_path.exists():
                         with file_path.open("rb") as handle:

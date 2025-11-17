@@ -283,7 +283,9 @@ def _parse_email_message(message: EmailMessage, size_hint: int) -> ParsedEmail:
         attachments=_parse_attachments(message),
         email_size=size_hint,
     )
-    parsed.subject_id = body_fields.get("subject") or _build_subject_id(parsed.date_reported)
+    # Subject ID should be from Date Reported (formatted as YYYYMMDDTHHMMSS)
+    # Fall back to "Subject:" field from body only if Date Reported is not available
+    parsed.subject_id = _build_subject_id(parsed.date_reported) or body_fields.get("subject")
     return parsed
 
 
@@ -417,7 +419,9 @@ def parse_msg_file(path: Path) -> ParsedEmail:
         attachments=attachments,
         email_size=path.stat().st_size,
     )
-    parsed.subject_id = body_fields.get("subject") or _build_subject_id(parsed.date_reported)
+    # Subject ID should be from Date Reported (formatted as YYYYMMDDTHHMMSS)
+    # Fall back to "Subject:" field from body only if Date Reported is not available
+    parsed.subject_id = _build_subject_id(parsed.date_reported) or body_fields.get("subject")
     return parsed
 
 

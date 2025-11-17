@@ -20,6 +20,7 @@ from app.services.email_exports import (
 from app.services.reporting import generate_email_report
 from app.services.standard_email_records import get_standard_email_detail, list_standard_email_records
 from app.ui.state import AppState
+from app.ui.utils.images import display_image_with_dialog, process_html_images
 
 
 def _render_pdf_preview(file_path: Path, file_name: str) -> None:
@@ -71,8 +72,11 @@ def _has_custom_background(body_html: str) -> bool:
 
 
 def _render_email_body(body_html: str) -> None:
-    if _has_custom_background(body_html):
-        html(body_html, height=500, scrolling=True)
+    # Process HTML to convert images to thumbnails
+    processed_html = process_html_images(body_html)
+    
+    if _has_custom_background(processed_html):
+        html(processed_html, height=500, scrolling=True)
     else:
         wrapped = f"""
         <div style="
@@ -82,7 +86,7 @@ def _render_email_body(body_html: str) -> None:
             border-radius: 12px;
             box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
         ">
-        {body_html}
+        {processed_html}
         </div>
         """
         html(wrapped, height=500, scrolling=True)
@@ -178,7 +182,7 @@ def _render_saved_email_table(state: AppState) -> tuple[list[dict], list[int]]:
             options=["Subject", "Sender", "Date Sent", "Created"],
             key="standard_sort_column",
         )
-        sort_order = st.selectbox("Sort order", options=["Ascending", "Descending"], key="standard_sort_order")
+        sort_order = st.selectbox("Sort order", options=["Ascending", "Descending"], index=0, key="standard_sort_order")  # Default to Ascending
 
     accessor = column_accessors[selected_column]
     if include_text:
@@ -382,7 +386,11 @@ def _render_saved_email_detail(state: AppState, detail: dict) -> None:
                         try:
                             with path.open("rb") as fh:
                                 Image.open(fh)
-                            st.image(str(path), caption=file_name, width="stretch")
+                            display_image_with_dialog(
+                                image_path=path,
+                                caption=file_name,
+                                key=f"db_attachment_{record_id}_{file_name}",
+                            )
                         except UnidentifiedImageError:
                             st.info(f"{file_name}: preview not available for this image type.")
                 elif category == "pdf":

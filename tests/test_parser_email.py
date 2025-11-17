@@ -24,7 +24,8 @@ def test_parse_eml_bytes_extracts_fields():
     data = make_test_email()
     parsed = parse_eml_bytes(data)
     assert parsed.sender == "alerts@example.com"
-    assert parsed.subject_id == "Alert-2025"
+    # Subject ID should be from Date Reported (YYYYMMDDTHHMMSS format), not from body "Subject:" field
+    assert parsed.subject_id == "20251112T195438"
     assert parsed.date_reported is not None
     assert parsed.urls_parsed == ["example.com"]
     assert "+18881111111" in parsed.callback_numbers_parsed
