@@ -28,6 +28,7 @@ from app.services.database_admin import (
     truncate_table,
 )
 from app.ui.state import AppState
+from app.utils.path_validation import normalize_sqlite_path, validate_path
 
 EXCLUDED_TABLES: Sequence[str] = ("sqlite_sequence", "alembic_version")
 
@@ -216,21 +217,54 @@ def render(state: AppState) -> None:
 
     if submitted:
         try:
+            # Validate and normalize database URL
+            normalized_db_url = normalize_sqlite_path(db_url.strip())
+            
+            # Resolve all paths
+            resolved_paths = {
+                "pickle_cache_dir": _as_path(cache_dir),
+                "input_dir": _as_path(input_dir),
+                "output_dir": _as_path(output_dir),
+                "scripts_dir": _as_path(scripts_dir),
+                "log_dir": _as_path(log_dir),
+            }
+            
+            # Validate all paths for Windows compatibility
+            validation_errors = []
+            for path_name, path_obj in resolved_paths.items():
+                is_valid, error = validate_path(path_obj)
+                if not is_valid:
+                    validation_errors.append(f"{path_name.replace('_', ' ').title()}: {error}")
+            
+            if validation_errors:
+                st.error("Path validation failed:\n" + "\n".join(f"• {err}" for err in validation_errors))
+                st.info("Please fix the path issues above and try again.")
+                return
+            
             new_config = AppConfig(
-                database_url=db_url.strip(),
-                pickle_cache_dir=_as_path(cache_dir),
-                input_dir=_as_path(input_dir),
-                output_dir=_as_path(output_dir),
-                scripts_dir=_as_path(scripts_dir),
-                log_dir=_as_path(log_dir),
+                database_url=normalized_db_url,
+                pickle_cache_dir=resolved_paths["pickle_cache_dir"],
+                input_dir=resolved_paths["input_dir"],
+                output_dir=resolved_paths["output_dir"],
+                scripts_dir=resolved_paths["scripts_dir"],
+                log_dir=resolved_paths["log_dir"],
                 env_name=state.config.env_name,
             )
 
-            new_config.input_dir.mkdir(parents=True, exist_ok=True)
-            new_config.output_dir.mkdir(parents=True, exist_ok=True)
-            new_config.pickle_cache_dir.mkdir(parents=True, exist_ok=True)
-            new_config.scripts_dir.mkdir(parents=True, exist_ok=True)
-            new_config.log_dir.mkdir(parents=True, exist_ok=True)
+            # Create directories (may fail due to permissions)
+            try:
+                new_config.input_dir.mkdir(parents=True, exist_ok=True)
+                new_config.output_dir.mkdir(parents=True, exist_ok=True)
+                new_config.pickle_cache_dir.mkdir(parents=True, exist_ok=True)
+                new_config.scripts_dir.mkdir(parents=True, exist_ok=True)
+                new_config.log_dir.mkdir(parents=True, exist_ok=True)
+            except PermissionError as exc:
+                st.error(f"Permission denied creating directory: {exc}")
+                st.info("Please ensure you have write permissions to the specified directories.")
+                return
+            except OSError as exc:
+                st.error(f"Failed to create directory: {exc}")
+                return
 
             env_path = save_config(new_config)
             reset_engine(new_config)
@@ -239,8 +273,11 @@ def render(state: AppState) -> None:
             state.add_notification("Configuration updated and persisted.")
 
             st.success(f"Settings saved to {env_path} and database connection reloaded.")
+        except ValueError as exc:
+            st.error(f"Invalid configuration: {exc}")
         except Exception as exc:  # noqa: BLE001
             st.error(f"Failed to save settings: {exc}")
+            logger.exception("Settings save failed")
 
     st.divider()
 

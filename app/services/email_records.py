@@ -111,11 +111,22 @@ def _update_pickle(batch: PickleBatch, email: InputEmail) -> None:
                 {
                     "subject": email.subject,
                     "subject_id": email.subject_id,
-                    "model_confidence": email.model_confidence,
-                    "urls": _loads(email.url_parsed),
-                    "callback_numbers": _loads(email.callback_number_parsed),
+                    "sender": email.sender,
                     "date_sent": email.date_sent.isoformat() if email.date_sent else None,
                     "date_reported": email.date_reported.isoformat() if email.date_reported else None,
+                    # Maintain backward compatibility with "urls" and "callback_numbers"
+                    "urls": _loads(email.url_parsed),
+                    "urls_raw": _loads(email.url_raw),
+                    "urls_parsed": _loads(email.url_parsed),
+                    "callback_numbers": _loads(email.callback_number_parsed),
+                    "callback_numbers_raw": _loads(email.callback_number_raw),
+                    "callback_numbers_parsed": _loads(email.callback_number_parsed),
+                    "sending_source_raw": email.sending_source_raw,
+                    "sending_source_parsed": _loads(email.sending_source_parsed),
+                    "additional_contacts": email.additional_contacts,
+                    "model_confidence": email.model_confidence,
+                    "message_id": email.message_id,
+                    "body_html": email.body_html,
                 }
             )
             updated = True
@@ -131,9 +142,19 @@ def _update_pickle(batch: PickleBatch, email: InputEmail) -> None:
                 "sender": email.sender,
                 "date_sent": email.date_sent.isoformat() if email.date_sent else None,
                 "date_reported": email.date_reported.isoformat() if email.date_reported else None,
+                # Maintain backward compatibility with "urls" and "callback_numbers"
                 "urls": _loads(email.url_parsed),
+                "urls_raw": _loads(email.url_raw),
+                "urls_parsed": _loads(email.url_parsed),
                 "callback_numbers": _loads(email.callback_number_parsed),
+                "callback_numbers_raw": _loads(email.callback_number_raw),
+                "callback_numbers_parsed": _loads(email.callback_number_parsed),
+                "sending_source_raw": email.sending_source_raw,
+                "sending_source_parsed": _loads(email.sending_source_parsed),
+                "additional_contacts": email.additional_contacts,
                 "model_confidence": email.model_confidence,
+                "message_id": email.message_id,
+                "body_html": email.body_html,
             }
         )
 

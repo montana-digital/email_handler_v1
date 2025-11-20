@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import platform
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
+from loguru import logger
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -18,17 +20,51 @@ _ENGINE: Engine | None = None
 _SESSION_FACTORY: sessionmaker[Session] | None = None
 
 
+def _get_engine_connect_args(database_url: str) -> dict:
+    """Get connection arguments for SQLite engine, including Windows-specific optimizations."""
+    connect_args = {}
+    
+    # Enable WAL mode on Windows for better concurrent access
+    if platform.system() == "Windows" and database_url.startswith("sqlite:///"):
+        # WAL mode improves concurrent read access and reduces locking issues
+        connect_args["check_same_thread"] = False
+        # Set timeout for locked database (30 seconds)
+        connect_args["timeout"] = 30.0
+    
+    return connect_args
+
+
 def get_engine(database_url: Optional[str] = None, *, config: Optional[AppConfig] = None) -> Engine:
     global _ENGINE
 
     cfg = config or load_config()
     db_url = database_url or cfg.database_url
 
+    connect_args = _get_engine_connect_args(db_url)
+
     if _ENGINE is None:
-        _ENGINE = create_engine(db_url, echo=False, future=True)
+        _ENGINE = create_engine(db_url, echo=False, future=True, connect_args=connect_args)
+        # Enable WAL mode for SQLite on Windows
+        if platform.system() == "Windows" and db_url.startswith("sqlite:///"):
+            try:
+                with _ENGINE.connect() as conn:
+                    conn.execute(text("PRAGMA journal_mode=WAL"))
+                    conn.commit()
+                logger.debug("Enabled WAL mode for SQLite database")
+            except Exception as exc:
+                logger.warning("Failed to enable WAL mode for SQLite: %s", exc)
     elif str(_ENGINE.url) != db_url:
         _ENGINE.dispose()
-        _ENGINE = create_engine(db_url, echo=False, future=True)
+        _ENGINE = create_engine(db_url, echo=False, future=True, connect_args=connect_args)
+        # Enable WAL mode for new engine
+        if platform.system() == "Windows" and db_url.startswith("sqlite:///"):
+            try:
+                with _ENGINE.connect() as conn:
+                    conn.execute(text("PRAGMA journal_mode=WAL"))
+                    conn.commit()
+                logger.debug("Enabled WAL mode for SQLite database")
+            except Exception as exc:
+                logger.warning("Failed to enable WAL mode for SQLite: %s", exc)
     return _ENGINE
 
 
@@ -57,7 +93,19 @@ def reset_engine(config: AppConfig) -> None:
     if _ENGINE is not None:
         _ENGINE.dispose()
 
-    _ENGINE = create_engine(config.database_url, echo=False, future=True)
+    connect_args = _get_engine_connect_args(config.database_url)
+    _ENGINE = create_engine(config.database_url, echo=False, future=True, connect_args=connect_args)
+    
+    # Enable WAL mode for SQLite on Windows
+    if platform.system() == "Windows" and config.database_url.startswith("sqlite:///"):
+        try:
+            with _ENGINE.connect() as conn:
+                conn.execute(text("PRAGMA journal_mode=WAL"))
+                conn.commit()
+            logger.debug("Enabled WAL mode for SQLite database")
+        except Exception as exc:
+            logger.warning("Failed to enable WAL mode for SQLite: %s", exc)
+    
     _SESSION_FACTORY = _build_session_factory(_ENGINE)
     init_db(engine=_ENGINE, config=config)
 

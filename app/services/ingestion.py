@@ -18,6 +18,7 @@ from app.db.repositories import find_input_email_by_hash, register_pickle_batch,
 from app.parsers import ParsedAttachment
 from app.services.parsing import detect_candidate, run_parsing_pipeline
 from app.utils import sha256_digest
+from app.utils.path_validation import validate_path_length
 
 ATTACHMENT_ROOT = "attachments"
 
@@ -46,8 +47,31 @@ def _discover_email_files(directory: Path) -> List[Path]:
 def _save_attachment(config: AppConfig, email_hash: str, attachment: ParsedAttachment) -> Path:
     attachment_dir = config.output_dir / ATTACHMENT_ROOT / email_hash
     attachment_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = attachment.file_name.replace("/", "_").replace("\\", "_")
+    
+    # Use proper Windows filename sanitization
+    from app.utils.path_validation import sanitize_filename
+    safe_name = sanitize_filename(attachment.file_name)
+    
     destination = attachment_dir / safe_name
+    
+    # Validate path length before writing (Windows 260-char limit)
+    is_valid, error = validate_path_length(destination)
+    if not is_valid:
+        # Truncate filename if path is too long
+        # Calculate max filename length: 260 (max path) - directory length - 1 (separator) - some buffer
+        dir_str = str(attachment_dir)
+        max_path_len = 260
+        buffer = 10  # Safety buffer
+        max_name_len = max_path_len - len(dir_str) - 1 - buffer
+        
+        name_part = Path(safe_name).stem
+        ext_part = Path(safe_name).suffix
+        if len(name_part) > max_name_len:
+            name_part = name_part[:max_name_len]
+        safe_name = f"{name_part}{ext_part}"
+        destination = attachment_dir / safe_name
+        logger.warning("Attachment path too long, truncated filename: %s", safe_name)
+    
     destination.write_bytes(attachment.payload)
     return destination
 
@@ -134,13 +158,23 @@ def _prepare_pickle_payload(emails: Iterable[InputEmail]) -> List[dict]:
                 "id": email.id,
                 "email_hash": email.email_hash,
                 "subject": email.subject,
+                "subject_id": email.subject_id,
                 "sender": email.sender,
                 "date_sent": email.date_sent.isoformat() if email.date_sent else None,
                 "date_reported": email.date_reported.isoformat() if email.date_reported else None,
-                "subject_id": email.subject_id,
+                # Maintain backward compatibility with "urls" and "callback_numbers"
                 "urls": json.loads(email.url_parsed or "[]"),
+                "urls_raw": json.loads(email.url_raw or "[]"),
+                "urls_parsed": json.loads(email.url_parsed or "[]"),
                 "callback_numbers": json.loads(email.callback_number_parsed or "[]"),
+                "callback_numbers_raw": json.loads(email.callback_number_raw or "[]"),
+                "callback_numbers_parsed": json.loads(email.callback_number_parsed or "[]"),
+                "sending_source_raw": email.sending_source_raw,
+                "sending_source_parsed": json.loads(email.sending_source_parsed or "[]"),
+                "additional_contacts": email.additional_contacts,
                 "model_confidence": email.model_confidence,
+                "message_id": email.message_id,
+                "body_html": email.body_html,
             }
         )
     return payload
@@ -237,6 +271,12 @@ def ingest_emails(
         if progress_callback:
             progress_callback(idx, total_files, file_path.name)
         try:
+            # Validate path length (Windows 260-char limit)
+            is_valid, error = validate_path_length(file_path)
+            if not is_valid:
+                skipped.append(f"{file_path.name}: {error}")
+                continue
+            
             # Check file size before reading
             file_size = file_path.stat().st_size
             if file_size > MAX_EMAIL_SIZE:

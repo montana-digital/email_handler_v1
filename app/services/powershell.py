@@ -72,10 +72,17 @@ class PowerShellScriptInfo:
 
 
 def _apply_placeholders(value: str, config: AppConfig) -> str:
+    """Apply path placeholders, ensuring Windows paths are properly formatted."""
     resolved = value
     for placeholder, getter in PLACEHOLDER_MAP.items():
         if placeholder in resolved:
-            resolved = resolved.replace(placeholder, str(getter(config)))
+            path_value = getter(config)
+            # Ensure path is resolved and uses proper format
+            if isinstance(path_value, Path):
+                path_str = str(path_value.resolve())
+            else:
+                path_str = str(path_value)
+            resolved = resolved.replace(placeholder, path_str)
     return resolved
 
 
@@ -163,6 +170,14 @@ def run_powershell_script(
 
     shell_executable = _resolve_powershell_executable(powershell_path)
 
+    # Resolve working directory if provided
+    resolved_working_dir = None
+    if working_directory:
+        resolved_working_dir = working_directory.resolve()
+        if not resolved_working_dir.exists():
+            logger.warning("Working directory does not exist: %s", resolved_working_dir)
+            resolved_working_dir.mkdir(parents=True, exist_ok=True)
+
     command = [
         shell_executable,
         "-ExecutionPolicy",
@@ -180,7 +195,7 @@ def run_powershell_script(
     logger.info(
         "Launching PowerShell script: {} (cwd={})",
         shlex.join(command),
-        working_directory or "default",
+        str(resolved_working_dir) if resolved_working_dir else "default",
     )
 
     try:
@@ -190,7 +205,7 @@ def run_powershell_script(
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
-            cwd=str(working_directory) if working_directory else None,
+            cwd=str(resolved_working_dir) if resolved_working_dir else None,
         )
     except subprocess.TimeoutExpired as exc:  # noqa: PERF203 - streamlit triggers on main thread
         logger.error("PowerShell script timed out after {} seconds: {}", exc.timeout, resolved_script)
@@ -243,6 +258,15 @@ def stream_powershell_script(
         raise FileNotFoundError(f"PowerShell script not found: {resolved_script}")
 
     shell_executable = _resolve_powershell_executable(powershell_path)
+    
+    # Resolve working directory if provided
+    resolved_working_dir = None
+    if working_directory:
+        resolved_working_dir = working_directory.resolve()
+        if not resolved_working_dir.exists():
+            logger.warning("Working directory does not exist: %s", resolved_working_dir)
+            resolved_working_dir.mkdir(parents=True, exist_ok=True)
+    
     command = [
         shell_executable,
         "-ExecutionPolicy",
@@ -259,7 +283,7 @@ def stream_powershell_script(
     logger.info(
         "Streaming PowerShell script: {} (cwd={})",
         shlex.join(command),
-        working_directory or "default",
+        str(resolved_working_dir) if resolved_working_dir else "default",
     )
 
     try:
@@ -268,7 +292,7 @@ def stream_powershell_script(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            cwd=str(working_directory) if working_directory else None,
+            cwd=str(resolved_working_dir) if resolved_working_dir else None,
         )
     except FileNotFoundError as exc:
         logger.exception("Failed to start PowerShell script {}", resolved_script)

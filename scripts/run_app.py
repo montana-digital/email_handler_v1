@@ -45,10 +45,17 @@ def ensure_env_file() -> None:
             ENV_FILE.write_text(candidate.read_text(encoding="utf-8"), encoding="utf-8")
             print(f"[run-app] Created .env from template {candidate.name}.")
             return
+    
+    # Use absolute paths for better Windows compatibility
+    # Paths are resolved relative to PROJECT_ROOT in load_config()
+    db_path = (PROJECT_ROOT / "data" / "email_handler.db").resolve()
+    # Convert Windows path to SQLite URL format (forward slashes)
+    db_url = f"sqlite:///{str(db_path).replace(chr(92), '/')}"
+    
     ENV_FILE.write_text(
         "\n".join(
             [
-                "EMAIL_HANDLER_DATABASE_URL=sqlite:///data/email_handler.db",
+                f"EMAIL_HANDLER_DATABASE_URL={db_url}",
                 "EMAIL_HANDLER_INPUT_DIR=data/input",
                 "EMAIL_HANDLER_OUTPUT_DIR=data/output",
                 "EMAIL_HANDLER_CACHE_DIR=data/cache",

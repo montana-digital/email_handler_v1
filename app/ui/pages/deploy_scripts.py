@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import streamlit as st
+from loguru import logger
 
 from app.services.powershell import (
     PowerShellNotAvailableError,
@@ -22,11 +23,41 @@ from app.services.powershell import (
 from app.ui.state import AppState
 
 
-def _persist_uploaded_script(upload, target_dir: Path) -> Path:
+def _persist_uploaded_script(upload, target_dir: Path, filename: str | None = None) -> Path:
+    """Persist an uploaded file to disk.
+    
+    Args:
+        upload: Streamlit UploadedFile object
+        target_dir: Directory to save the file
+        filename: Optional filename (if not provided, uses upload.name)
+    
+    Returns:
+        Path to the saved file
+    """
     target_dir.mkdir(parents=True, exist_ok=True)
-    destination = target_dir / upload.name
-    with destination.open("wb") as f:
-        shutil.copyfileobj(upload, f)
+    
+    # Use provided filename or try to get from upload object
+    if filename:
+        file_name = filename
+    else:
+        try:
+            file_name = upload.name
+        except (AttributeError, RuntimeError) as exc:
+            # File may have been cleared from memory
+            logger.error("Failed to get filename from upload object: %s", exc)
+            raise ValueError("Uploaded file is no longer available. Please upload again.") from exc
+    
+    destination = target_dir / file_name
+    
+    try:
+        # Read the file content before it's cleared from memory
+        file_content = upload.read()
+        with destination.open("wb") as f:
+            f.write(file_content)
+    except (AttributeError, RuntimeError, OSError) as exc:
+        logger.exception("Failed to persist uploaded file: %s", exc)
+        raise ValueError(f"Failed to save file: {exc}") from exc
+    
     return destination
 
 
@@ -120,11 +151,28 @@ def render(state: AppState) -> None:
 
     st.subheader("Upload New Scripts")
     with st.expander("Add or replace PowerShell scripts", expanded=False):
-        uploaded = st.file_uploader("Upload .ps1 script", type=["ps1"])
+        uploaded = st.file_uploader("Upload .ps1 script", type=["ps1"], key="script_uploader")
         if uploaded:
-            saved_path = _persist_uploaded_script(uploaded, state.config.scripts_dir)
-            st.success(f"Saved script to {saved_path}")
-            state.add_notification(f"Script uploaded: {uploaded.name}")
+            # Capture filename immediately before persisting (to avoid memory_media_file_storage errors)
+            # Access upload.name immediately while the file is still in memory
+            try:
+                filename = uploaded.name
+            except (AttributeError, RuntimeError) as exc:
+                logger.error("Failed to get filename from upload: %s", exc)
+                st.error("Uploaded file is no longer available. Please upload again.")
+                st.stop()
+            
+            try:
+                saved_path = _persist_uploaded_script(uploaded, state.config.scripts_dir, filename=filename)
+                st.success(f"Saved script to {saved_path}")
+                state.add_notification(f"Script uploaded: {filename}")
+                # Clear the uploader after successful save to prevent re-processing
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                logger.exception("Failed to persist uploaded script: %s", exc)
+                st.error(f"Failed to save script: {exc}")
 
     scripts = sorted(state.config.scripts_dir.glob("*.ps1"))
     if not scripts:

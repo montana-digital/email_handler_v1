@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Dict
 
 from dotenv import dotenv_values
+from loguru import logger
 
 from app.config import AppConfig, PROJECT_ROOT
+from app.utils.path_validation import validate_path
 
 ENV_KEY_MAP = {
     "database_url": "EMAIL_HANDLER_DATABASE_URL",
@@ -26,6 +28,12 @@ def _config_to_env_values(config: AppConfig) -> Dict[str, str]:
         value = getattr(config, field_name)
         if value is None:
             continue
+        # For paths, validate before saving
+        if isinstance(value, Path):
+            is_valid, error = validate_path(value)
+            if not is_valid:
+                logger.warning("Path validation failed for %s: %s", field_name, error)
+                # Continue anyway, but log the warning
         values[env_key] = str(value)
     return values
 
