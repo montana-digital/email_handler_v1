@@ -21,7 +21,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     psutil = None
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 LOGO_CANDIDATES = [
     Path("assets/logo.png"),
     Path("public/logo.png"),

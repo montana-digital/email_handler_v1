@@ -17,7 +17,7 @@ from app.db.models import Attachment, InputEmail, PickleBatch, StandardEmail
 from app.ui.state import AppState
 from app.ui.styles.animations import inject_reveal_animations
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 KEY_DEPENDENCIES = ["streamlit", "sqlalchemy", "pandas", "pydantic", "loguru"]
 RECENT_BATCH_LIMIT = 3
 LOGO_CANDIDATES = [

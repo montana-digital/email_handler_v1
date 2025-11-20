@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime
 import math
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from loguru import logger
 
 from app.db.init_db import session_scope
 from app.services.attachments import (
@@ -17,6 +19,7 @@ from app.services.attachments import (
 )
 from app.services.email_records import get_batches
 from app.ui.state import AppState
+from app.ui.utils.images import display_image_with_dialog
 
 
 def render(state: AppState) -> None:
@@ -60,36 +63,190 @@ def render(state: AppState) -> None:
         st.info("No attachments found for the current filters.")
         return
 
+    # Column accessors for filtering
     column_accessors = {
         "File Name": lambda record: record["file_name"] or "",
         "Category": lambda record: record["category"] or "",
         "Subject": lambda record: record["email_subject"] or "",
-        "Subject ID": lambda record: record["subject_id"] or "",
+        "Subject ID": lambda record: record.get("subject_id") or "",
         "Sender": lambda record: record["email_sender"] or "",
         "Batch": lambda record: record["batch_name"] or "",
     }
 
-    with st.expander("Advanced Filters", expanded=False):
-        selected_column = st.selectbox("Filter column", options=list(column_accessors.keys()))
-        include_text = st.text_input("Include attachments containing", key="attachments_include").strip()
-        exclude_text = st.text_input("Exclude attachments containing", key="attachments_exclude").strip()
-        # Subject ID filter
-        subject_id_filter = st.text_input("Filter by Subject ID", key="attachments_subject_id_filter").strip()
-        sort_column = st.selectbox("Sort by", options=["File Name", "Category", "Subject", "Subject ID", "Sender", "Batch", "Size"])
-        sort_order = st.selectbox("Sort order", options=["Ascending", "Descending"], index=0)  # Default to Ascending
+    # Helper function to extract unique values from a column
+    def _extract_unique_values(records: list[dict], column_name: str, accessor) -> list[str]:
+        """Extract unique, non-empty values from a column."""
+        values = set()
+        for record in records:
+            value = accessor(record)
+            if isinstance(value, list):
+                # For list fields, add each item
+                for item in value:
+                    if item and str(item).strip():
+                        values.add(str(item).strip())
+            elif value and str(value).strip():
+                values.add(str(value).strip())
+        return sorted(list(values))
 
-    accessor = column_accessors[selected_column]
+    def _filter_match(value, selected_values: list[str], match_type: str) -> bool:
+        """Check if a value matches the filter criteria."""
+        if isinstance(value, list):
+            # For list fields, check if any item in the list matches
+            value_strs = [str(v).lower().strip() for v in value if v]
+            selected_lower = [str(s).lower().strip() for s in selected_values]
+            
+            if match_type == "include":
+                # Include: at least one item in value must be in selected_values
+                return any(v in selected_lower for v in value_strs)
+            else:  # exclude
+                # Exclude: no item in value should be in selected_values
+                return not any(v in selected_lower for v in value_strs)
+        else:
+            # For string fields, check if the value matches
+            value_str = str(value).lower().strip() if value else ""
+            selected_lower = [str(s).lower().strip() for s in selected_values]
+            
+            if match_type == "include":
+                # Include: value must be in selected_values
+                return value_str in selected_lower
+            else:  # exclude
+                # Exclude: value must not be in selected_values
+                return value_str not in selected_lower
+
+    # Initialize filter state in session
+    if "attachment_active_filters" not in st.session_state:
+        st.session_state["attachment_active_filters"] = []
+
+    # Advanced Filters UI
+    with st.expander("Advanced Filters", expanded=False):
+        st.markdown("**Add multiple filters to narrow down results. All filters are applied with AND logic.**")
+        
+        # Display active filters
+        if st.session_state["attachment_active_filters"]:
+            st.markdown("**Active Filters:**")
+            for idx, filter_config in enumerate(st.session_state["attachment_active_filters"]):
+                col_name = filter_config["column"]
+                selected_values = filter_config["values"]
+                filter_type = filter_config.get("type", "include")  # include or exclude
+                
+                with st.container(border=True):
+                    filter_col1, filter_col2, filter_col3 = st.columns([3, 2, 1])
+                    with filter_col1:
+                        st.markdown(f"**{col_name}** ({filter_type})")
+                    with filter_col2:
+                        if selected_values:
+                            display_text = ", ".join(selected_values[:3])
+                            if len(selected_values) > 3:
+                                display_text += f" (+{len(selected_values) - 3} more)"
+                            st.caption(display_text)
+                        else:
+                            st.caption("No values selected")
+                    with filter_col3:
+                        if st.button("Remove", key=f"remove_attachment_filter_{idx}", use_container_width=True):
+                            st.session_state["attachment_active_filters"].pop(idx)
+                            st.rerun()
+        
+        # Add new filter section
+        st.markdown("---")
+        st.markdown("**Add New Filter:**")
+        
+        filter_col1, filter_col2 = st.columns([2, 1])
+        with filter_col1:
+            available_columns = list(column_accessors.keys())
+            # Exclude columns that already have filters
+            existing_filter_columns = {f["column"] for f in st.session_state["attachment_active_filters"]}
+            new_filter_columns = [col for col in available_columns if col not in existing_filter_columns]
+            
+            if new_filter_columns:
+                new_filter_column = st.selectbox(
+                    "Select column to filter",
+                    options=new_filter_columns,
+                    key="new_attachment_filter_column",
+                    help="Select a column that doesn't already have an active filter"
+                )
+            else:
+                st.info("All available columns already have filters. Remove a filter to add a new one.")
+                new_filter_column = None
+        with filter_col2:
+            filter_type = st.selectbox(
+                "Filter type",
+                options=["Include", "Exclude"],
+                key="new_attachment_filter_type",
+                help="Include: show records matching selected values. Exclude: hide records matching selected values."
+            )
+        
+        if new_filter_column:
+            # Extract unique values for the selected column
+            accessor = column_accessors[new_filter_column]
+            unique_values = _extract_unique_values(attachments, new_filter_column, accessor)
+            
+            if unique_values:
+                selected_values = st.multiselect(
+                    f"Select values to {filter_type.lower()}",
+                    options=unique_values,
+                    key=f"new_attachment_filter_values_{new_filter_column}",
+                    help=f"Found {len(unique_values)} unique values. Select one or more to filter by."
+                )
+                
+                add_filter_col1, add_filter_col2 = st.columns([1, 1])
+                with add_filter_col1:
+                    if st.button("Add Filter", key="add_attachment_filter_button", use_container_width=True, disabled=not selected_values):
+                        new_filter = {
+                            "column": new_filter_column,
+                            "values": selected_values,
+                            "type": filter_type.lower(),
+                        }
+                        st.session_state["attachment_active_filters"].append(new_filter)
+                        st.rerun()
+                with add_filter_col2:
+                    if st.button("Clear All Filters", key="clear_all_attachment_filters", use_container_width=True):
+                        st.session_state["attachment_active_filters"] = []
+                        st.rerun()
+            else:
+                st.info(f"No unique values found in '{new_filter_column}' column for the current results.")
+        
+        # Sorting options
+        st.markdown("---")
+        st.markdown("**Sorting:**")
+        sort_col1, sort_col2 = st.columns(2)
+        with sort_col1:
+            sort_column = st.selectbox(
+                "Sort by",
+                options=["File Name", "Category", "Subject", "Subject ID", "Sender", "Batch", "Size"],
+                index=0,
+                key="attachment_sort_column_select",
+            )
+        with sort_col2:
+            sort_order = st.selectbox(
+                "Sort order",
+                options=["Ascending", "Descending"],
+                index=0,
+                key="attachment_sort_order_select",
+            )
+
+    # Apply all active filters
     filtered_records = attachments
-    if include_text:
-        include_lower = include_text.lower()
-        filtered_records = [record for record in filtered_records if include_lower in accessor(record).lower()]
-    if exclude_text:
-        exclude_lower = exclude_text.lower()
-        filtered_records = [record for record in filtered_records if exclude_lower not in accessor(record).lower()]
-    # Filter by Subject ID
-    if subject_id_filter:
-        subject_id_lower = subject_id_filter.lower()
-        filtered_records = [record for record in filtered_records if subject_id_lower in (record.get("subject_id") or "").lower()]
+    for filter_config in st.session_state["attachment_active_filters"]:
+        column_name = filter_config["column"]
+        selected_values = filter_config["values"]
+        filter_type = filter_config.get("type", "include")
+        accessor = column_accessors[column_name]
+        
+        if not selected_values:
+            continue
+        
+        if filter_type == "include":
+            # Include: record must match at least one of the selected values
+            filtered_records = [
+                record for record in filtered_records
+                if _filter_match(accessor(record), selected_values, match_type="include")
+            ]
+        else:  # exclude
+            # Exclude: record must not match any of the selected values
+            filtered_records = [
+                record for record in filtered_records
+                if _filter_match(accessor(record), selected_values, match_type="exclude")
+            ]
 
     sort_key_map = {
         "File Name": lambda record: (record["file_name"] or "").lower(),
@@ -381,6 +538,38 @@ def render(state: AppState) -> None:
                             st.caption(f"Attachment #{att.id}: {att.file_name or 'No filename'}")
                         if len(related_attachments) > 10:
                             st.caption(f"... and {len(related_attachments) - 10} more")
+    
+    # Display image preview if attachment is an image
+    file_path = Path(detail.get("storage_path") or "")
+    file_name = detail.get("file_name", "")
+    file_type = (detail.get("file_type") or "").lower()
+    category = detail.get("category", "").lower()
+    
+    # Check if this is an image attachment
+    is_image = (
+        category == "images" 
+        or file_type.startswith("image/")
+        or file_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".svg", ".webp"}
+    )
+    
+    if is_image and file_path.exists():
+        st.markdown("#### Image Preview")
+        try:
+            # Display image with appropriate sizing
+            # Streamlit's st.image will automatically scale to fit container
+            # We can use use_container_width=True for responsive sizing
+            display_image_with_dialog(
+                image_path=file_path,
+                caption=file_name,
+                key=f"attachment_preview_{selected_detail_id}",
+            )
+        except Exception as e:
+            st.warning(f"Could not display image preview: {e}")
+            st.caption(f"File exists at: {file_path}")
+    elif is_image:
+        st.warning(f"Image file not found at: {file_path}")
+        if file_path:
+            st.caption("The attachment file may have been moved or deleted.")
     
     st.json(
         {

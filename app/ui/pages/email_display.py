@@ -33,6 +33,81 @@ from app.ui.state import AppState
 from app.ui.utils.images import display_image_with_dialog, process_html_images
 
 
+def _html_to_text_for_display(html_content: str | None) -> str:
+    """Convert HTML to plain text for DataFrame display.
+    
+    Truncates to 500 characters for readability.
+    """
+    if not html_content:
+        return ""
+    
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_content, "html.parser")
+        # Remove script and style elements
+        for script in soup(["script", "style"]):
+            script.decompose()
+        text = soup.get_text(separator=" ", strip=True)
+        # Truncate if too long
+        if len(text) > 500:
+            return text[:500] + "..."
+        return text
+    except Exception:
+        # Fallback: simple tag stripping
+        import re
+        text = re.sub(r"<[^>]+>", " ", html_content)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > 500:
+            return text[:500] + "..."
+        return text
+
+
+def _format_date_for_display(date_str: str | None) -> str:
+    """Format ISO date string for display.
+    
+    Converts "2025-01-15T10:30:00+00:00" to "2025-01-15 10:30:00"
+    """
+    if not date_str:
+        return ""
+    try:
+        # Remove timezone info and replace T with space
+        if "T" in date_str:
+            # Split on T to get date and time parts
+            parts = date_str.split("T")
+            date_part = parts[0]
+            time_part = parts[1] if len(parts) > 1 else ""
+            
+            # Remove timezone and microseconds from time part
+            if time_part:
+                # Remove timezone (everything after + or -)
+                if "+" in time_part:
+                    time_part = time_part.split("+")[0]
+                elif "-" in time_part:
+                    # Check if this is a timezone (format: HH:MM:SS-HH:MM or HH:MM:SS-HHMM)
+                    # Timezone would be at the end after the time
+                    # Pattern: digits:digits:digits followed by -digits:digits or -digitsdigits
+                    import re
+                    # Match timezone pattern: - followed by digits (with optional colon)
+                    timezone_pattern = r'-\d{2}:?\d{2}$'
+                    if re.search(timezone_pattern, time_part):
+                        # Remove timezone
+                        time_part = re.sub(timezone_pattern, '', time_part)
+                    elif time_part.count("-") > 2:  # Has timezone (old logic for compatibility)
+                        # Find the last - which is likely the timezone separator
+                        time_parts = time_part.rsplit("-", 1)
+                        if len(time_parts) == 2:
+                            time_part = time_parts[0]
+                
+                # Remove microseconds if present
+                time_part = time_part.split(".")[0]
+                
+                return f"{date_part} {time_part}"
+            return date_part
+        return date_str
+    except Exception:
+        return date_str or ""
+
+
 def _input_counts(input_dir: Path) -> tuple[int, int]:
     if not input_dir.exists():
         return 0, 0
@@ -59,9 +134,131 @@ def _has_custom_background(body_html: str) -> bool:
     return any(token in lowered for token in tokens)
 
 
-def _render_email_body(body_html: str) -> None:
+def _detect_image_format_from_base64(base64_data: str) -> str:
+    """Try to detect image format from base64 data.
+    
+    Returns MIME type like 'image/png', 'image/jpeg', etc.
+    """
+    if not base64_data:
+        return "image/png"  # Default
+    
+    try:
+        import base64 as b64
+        # Decode first few bytes to check magic numbers
+        decoded = b64.b64decode(base64_data[:20] + "==")  # Add padding for short strings
+        
+        # Check magic numbers
+        if decoded.startswith(b'\x89PNG\r\n\x1a\n'):
+            return "image/png"
+        elif decoded.startswith(b'\xff\xd8\xff'):
+            return "image/jpeg"
+        elif decoded.startswith(b'GIF87a') or decoded.startswith(b'GIF89a'):
+            return "image/gif"
+        elif decoded.startswith(b'RIFF') and b'WEBP' in decoded[:12]:
+            return "image/webp"
+        else:
+            return "image/png"  # Default fallback
+    except Exception:
+        return "image/png"  # Default fallback
+
+
+def _fix_html_images(body_html: str, image_base64: str | None = None) -> str:
+    """Fix and enhance HTML to ensure images render correctly.
+    
+    - Injects base64 image if provided and no images found in HTML
+    - Fixes broken image references (cid:, etc.)
+    - Ensures base64 images are properly formatted
+    """
+    if not body_html:
+        return "" if body_html is None else body_html
+    
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(body_html, "html.parser")
+        
+        # Find all image tags
+        images = soup.find_all("img")
+        has_working_images = False
+        
+        # Check if we have any working images
+        for img in images:
+            src = img.get("src", "")
+            if src and (src.startswith("data:image") or src.startswith("http")):
+                has_working_images = True
+                break
+        
+        # If we have a base64 image and no working images in HTML, inject it
+        if image_base64 and not has_working_images:
+            # Detect image format
+            mime_type = _detect_image_format_from_base64(image_base64)
+            
+            img_tag = soup.new_tag("img")
+            img_tag["src"] = f"data:{mime_type};base64,{image_base64}"
+            img_tag["style"] = "max-width: 100%; height: auto; display: block; margin: 10px 0;"
+            img_tag["alt"] = "Email image"
+            
+            # Insert at the beginning of body or create body if needed
+            if soup.body:
+                soup.body.insert(0, img_tag)
+            elif soup.html:
+                if not soup.html.body:
+                    body_tag = soup.new_tag("body")
+                    body_tag.insert(0, img_tag)
+                    soup.html.append(body_tag)
+                else:
+                    soup.html.body.insert(0, img_tag)
+            else:
+                # No HTML structure, wrap in basic structure
+                html_tag = soup.new_tag("html")
+                body_tag = soup.new_tag("body")
+                body_tag.insert(0, img_tag)
+                html_tag.append(body_tag)
+                soup.insert(0, html_tag)
+        elif image_base64:
+            # We have images but also base64 - check if any are broken
+            mime_type = _detect_image_format_from_base64(image_base64)
+            for img in images:
+                src = img.get("src", "")
+                # Fix broken references (cid:, empty, etc.)
+                if not src or src.startswith("cid:") or src.startswith("x-msg-id:") or (src and not src.startswith("data:image") and not src.startswith("http")):
+                    # Replace with base64 image
+                    img["src"] = f"data:{mime_type};base64,{image_base64}"
+                    if not img.get("alt"):
+                        img["alt"] = "Email image"
+                    if not img.get("style"):
+                        img["style"] = "max-width: 100%; height: auto;"
+        
+        # Ensure all broken image references are fixed or removed
+        for img in soup.find_all("img"):
+            src = img.get("src", "")
+            if src and not src.startswith("data:image") and not src.startswith("http"):
+                # Might be a broken reference - try to use base64 if available
+                if image_base64:
+                    mime_type = _detect_image_format_from_base64(image_base64)
+                    img["src"] = f"data:{mime_type};base64,{image_base64}"
+                    if not img.get("alt"):
+                        img["alt"] = "Email image"
+                else:
+                    # Remove broken image or add placeholder
+                    img["alt"] = "Image not available"
+                    img["src"] = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgZmlsbD0iI2VlZSIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiM5OTkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGR5PSIuM2VtIj5JbWFnZSBub3QgYXZhaWxhYmxlPC90ZXh0Pjwvc3ZnPg=="
+        
+        return str(soup)
+    except Exception:
+        # If processing fails, return original HTML
+        return body_html
+
+
+def _render_email_body(body_html: str, image_base64: str | None = None) -> None:
+    """Render email body HTML with proper image support."""
+    if not body_html:
+        return
+    
+    # First, fix any broken images and inject base64 if needed
+    fixed_html = _fix_html_images(body_html, image_base64)
+    
     # Process HTML to convert images to thumbnails
-    processed_html = process_html_images(body_html)
+    processed_html = process_html_images(fixed_html)
     
     if _has_custom_background(processed_html):
         html(processed_html, height=500, scrolling=True)
@@ -251,37 +448,189 @@ def _render_batch_panel(state: AppState) -> None:
         or search_term in (record["email_hash"] or "").lower()
     ]
 
+    # Column accessors for filtering
     column_accessors = {
         "Subject": lambda record: record["subject"] or "",
         "Sender": lambda record: record["sender"] or "",
         "Subject ID": lambda record: record["subject_id"] or "",
         "Email Hash": lambda record: record["email_hash"] or "",
-        "URLs": lambda record: " ".join(record["urls_parsed"]),
-        "Callback Numbers": lambda record: " ".join(record["callback_numbers_parsed"]),
+        "URLs": lambda record: record["urls_parsed"] or [],
+        "Callback Numbers": lambda record: record["callback_numbers_parsed"] or [],
     }
 
-    with st.expander("Advanced Filters", expanded=False):
-        selected_column = st.selectbox("Filter column", options=list(column_accessors.keys()))
-        include_text = st.text_input("Include records containing", key="include_filter").strip()
-        exclude_text = st.text_input("Exclude records containing", key="exclude_filter").strip()
-        sort_column = st.selectbox(
-            "Sort by",
-            options=["ID", "Subject", "Sender", "Date Sent", "Subject ID"],
-            index=0,  # Default to ID
-        )
-        sort_order = st.selectbox("Sort order", options=["Ascending", "Descending"], index=0)  # Default to Ascending
+    # Helper function to extract unique values from a column
+    def _extract_unique_values(records: list[dict], column_name: str, accessor) -> list[str]:
+        """Extract unique, non-empty values from a column."""
+        values = set()
+        for record in records:
+            value = accessor(record)
+            if isinstance(value, list):
+                # For list fields (URLs, Callback Numbers), add each item
+                for item in value:
+                    if item and str(item).strip():
+                        values.add(str(item).strip())
+            elif value and str(value).strip():
+                values.add(str(value).strip())
+        return sorted(list(values))
 
-    accessor = column_accessors[selected_column]
-    if include_text:
-        include_lower = include_text.lower()
-        filtered = [
-            record for record in filtered if include_lower in accessor(record).lower()
-        ]
-    if exclude_text:
-        exclude_lower = exclude_text.lower()
-        filtered = [
-            record for record in filtered if exclude_lower not in accessor(record).lower()
-        ]
+    def _filter_match(value, selected_values: list[str], match_type: str) -> bool:
+        """Check if a value matches the filter criteria."""
+        if isinstance(value, list):
+            # For list fields, check if any item in the list matches
+            value_strs = [str(v).lower().strip() for v in value if v]
+            selected_lower = [str(s).lower().strip() for s in selected_values]
+            
+            if match_type == "include":
+                # Include: at least one item in value must be in selected_values
+                return any(v in selected_lower for v in value_strs)
+            else:  # exclude
+                # Exclude: no item in value should be in selected_values
+                return not any(v in selected_lower for v in value_strs)
+        else:
+            # For string fields, check if the value matches
+            value_str = str(value).lower().strip() if value else ""
+            selected_lower = [str(s).lower().strip() for s in selected_values]
+            
+            if match_type == "include":
+                # Include: value must be in selected_values
+                return value_str in selected_lower
+            else:  # exclude
+                # Exclude: value must not be in selected_values
+                return value_str not in selected_lower
+
+    # Initialize filter state in session
+    if "active_filters" not in st.session_state:
+        st.session_state["active_filters"] = []
+
+    # Advanced Filters UI
+    with st.expander("Advanced Filters", expanded=False):
+        st.markdown("**Add multiple filters to narrow down results. All filters are applied with AND logic.**")
+        
+        # Display active filters
+        if st.session_state["active_filters"]:
+            st.markdown("**Active Filters:**")
+            for idx, filter_config in enumerate(st.session_state["active_filters"]):
+                col_name = filter_config["column"]
+                selected_values = filter_config["values"]
+                filter_type = filter_config.get("type", "include")  # include or exclude
+                
+                with st.container(border=True):
+                    filter_col1, filter_col2, filter_col3 = st.columns([3, 2, 1])
+                    with filter_col1:
+                        st.markdown(f"**{col_name}** ({filter_type})")
+                    with filter_col2:
+                        if selected_values:
+                            display_text = ", ".join(selected_values[:3])
+                            if len(selected_values) > 3:
+                                display_text += f" (+{len(selected_values) - 3} more)"
+                            st.caption(display_text)
+                        else:
+                            st.caption("No values selected")
+                    with filter_col3:
+                        if st.button("Remove", key=f"remove_filter_{idx}", use_container_width=True):
+                            st.session_state["active_filters"].pop(idx)
+                            st.rerun()
+        
+        # Add new filter section
+        st.markdown("---")
+        st.markdown("**Add New Filter:**")
+        
+        filter_col1, filter_col2 = st.columns([2, 1])
+        with filter_col1:
+            available_columns = list(column_accessors.keys())
+            # Exclude columns that already have filters
+            existing_filter_columns = {f["column"] for f in st.session_state["active_filters"]}
+            new_filter_columns = [col for col in available_columns if col not in existing_filter_columns]
+            
+            if new_filter_columns:
+                new_filter_column = st.selectbox(
+                    "Select column to filter",
+                    options=new_filter_columns,
+                    key="new_filter_column",
+                    help="Select a column that doesn't already have an active filter"
+                )
+            else:
+                st.info("All available columns already have filters. Remove a filter to add a new one.")
+                new_filter_column = None
+        with filter_col2:
+            filter_type = st.selectbox(
+                "Filter type",
+                options=["Include", "Exclude"],
+                key="new_filter_type",
+                help="Include: show records matching selected values. Exclude: hide records matching selected values."
+            )
+        
+        if new_filter_column:
+            # Extract unique values for the selected column
+            accessor = column_accessors[new_filter_column]
+            unique_values = _extract_unique_values(filtered, new_filter_column, accessor)
+            
+            if unique_values:
+                selected_values = st.multiselect(
+                    f"Select values to {filter_type.lower()}",
+                    options=unique_values,
+                    key=f"new_filter_values_{new_filter_column}",
+                    help=f"Found {len(unique_values)} unique values. Select one or more to filter by."
+                )
+                
+                add_filter_col1, add_filter_col2 = st.columns([1, 1])
+                with add_filter_col1:
+                    if st.button("Add Filter", key="add_filter_button", use_container_width=True, disabled=not selected_values):
+                        new_filter = {
+                            "column": new_filter_column,
+                            "values": selected_values,
+                            "type": filter_type.lower(),
+                        }
+                        st.session_state["active_filters"].append(new_filter)
+                        st.rerun()
+                with add_filter_col2:
+                    if st.button("Clear All Filters", key="clear_all_filters", use_container_width=True):
+                        st.session_state["active_filters"] = []
+                        st.rerun()
+            else:
+                st.info(f"No unique values found in '{new_filter_column}' column for the current search results.")
+        
+        # Sorting options
+        st.markdown("---")
+        st.markdown("**Sorting:**")
+        sort_col1, sort_col2 = st.columns(2)
+        with sort_col1:
+            sort_column = st.selectbox(
+                "Sort by",
+                options=["ID", "Subject", "Sender", "Date Sent", "Subject ID"],
+                index=0,
+                key="sort_column_select",
+            )
+        with sort_col2:
+            sort_order = st.selectbox(
+                "Sort order",
+                options=["Ascending", "Descending"],
+                index=0,
+                key="sort_order_select",
+            )
+
+    # Apply all active filters
+    for filter_config in st.session_state["active_filters"]:
+        column_name = filter_config["column"]
+        selected_values = filter_config["values"]
+        filter_type = filter_config.get("type", "include")
+        accessor = column_accessors[column_name]
+        
+        if not selected_values:
+            continue
+        
+        if filter_type == "include":
+            # Include: record must match at least one of the selected values
+            filtered = [
+                record for record in filtered
+                if _filter_match(accessor(record), selected_values, match_type="include")
+            ]
+        else:  # exclude
+            # Exclude: record must not match any of the selected values
+            filtered = [
+                record for record in filtered
+                if _filter_match(accessor(record), selected_values, match_type="exclude")
+            ]
 
     sort_key_map = {
         "ID": lambda record: record["id"] or 0,
@@ -306,14 +655,25 @@ def _render_batch_panel(state: AppState) -> None:
 
     table_rows = [
         {
+            # Existing columns
             "ID": record["id"],
             "Status": record.get("parse_status") or "unknown",
-            "Subject": record["subject"],
-            "Sender": record["sender"],
-            "Date Sent": record["date_sent"],
-            "Subject ID": record["subject_id"],
-            "URLs": ", ".join(record["urls_parsed"]),
-            "Callback Numbers": ", ".join(record["callback_numbers_parsed"]),
+            "Subject": record.get("subject") or "",
+            "Sender": record.get("sender") or "",
+            "Date Sent": _format_date_for_display(record.get("date_sent")),
+            "Date Reported": _format_date_for_display(record.get("date_reported")),
+            "Subject ID": record.get("subject_id") or "",
+            "Sending Source": record.get("sending_source_raw") or "",
+            "Additional Contacts": record.get("additional_contacts") or "",
+            "Model Confidence": (
+                f"{record['model_confidence']:.2f}"
+                if record.get("model_confidence") is not None
+                else ""
+            ),
+            "URLs": ", ".join(record.get("urls_parsed", [])),
+            "Full URLs": ", ".join(record.get("urls_raw", [])),
+            "Callback Numbers": ", ".join(record.get("callback_numbers_parsed", [])),
+            "Body Text": _html_to_text_for_display(record.get("body_html")),
         }
         for record in page_records
     ]
@@ -631,7 +991,10 @@ def _render_batch_panel(state: AppState) -> None:
         with st.expander("HTML Preview & Attachments", expanded=False):
             if email_detail.get("body_html"):
                 st.markdown("#### HTML Preview")
-                _render_email_body(email_detail["body_html"])
+                _render_email_body(
+                    email_detail["body_html"],
+                    image_base64=email_detail.get("image_base64")
+                )
             elif email_detail.get("body_text"):
                 st.markdown("#### Plain Text Preview")
                 st.code(email_detail["body_text"])

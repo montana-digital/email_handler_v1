@@ -235,9 +235,116 @@ def _parse_attachments(message: EmailMessage | Message) -> list[ParsedAttachment
 
 
 def _build_subject_id(date_reported: Optional[datetime]) -> Optional[str]:
+    """Build Subject ID from date_reported datetime.
+    
+    Formats as YYYYMMDDTHHMMSS (no timezone).
+    """
     if not date_reported:
         return None
     return date_reported.strftime("%Y%m%dT%H%M%S")
+
+
+def _clean_timestamp_from_subject(subject: str | None) -> Optional[str]:
+    """Extract and clean timestamp from email subject header.
+    
+    Handles format: 2025-01-15T12:30:00+00:00
+    - Removes symbols (dashes, colons, spaces, timezone)
+    - Removes trailing 0000 if present
+    - Returns cleaned timestamp in YYYYMMDDTHHMMSS format
+    
+    Args:
+        subject: Email subject header string
+        
+    Returns:
+        Cleaned timestamp string (YYYYMMDDTHHMMSS) or None if not a timestamp
+    """
+    if not subject:
+        return None
+    
+    import re
+    
+    # Pattern to match timestamp-like format: 2025-01-15T12:30:00+00:00 or variations
+    # Matches: YYYY-MM-DDTHH:MM:SS+00:00, YYYY-MM-DDTHH:MM:SS, YYYYMMDDTHHMMSS, etc.
+    timestamp_pattern = re.compile(
+        r'(\d{4})[-/]?(\d{2})[-/]?(\d{2})[T\s](\d{2})[:]?(\d{2})[:]?(\d{2})([+-]\d{2}[:]?\d{2})?'
+    )
+    
+    match = timestamp_pattern.search(subject)
+    if match:
+        # Extract components from matched pattern
+        year = match.group(1)
+        month = match.group(2)
+        day = match.group(3)
+        hour = match.group(4)
+        minute = match.group(5)
+        second = match.group(6)
+        # Timezone is in group(7) but we ignore it
+        
+        # Build timestamp: YYYYMMDDTHHMMSS
+        timestamp = f"{year}{month}{day}T{hour}{minute}{second}"
+        
+        # Remove trailing 0000 if present (exactly 4 zeros)
+        if timestamp.endswith('0000'):
+            timestamp = timestamp[:-4]
+            # If we removed seconds, add back "00" to maintain format
+            if len(timestamp) == 13:  # YYYYMMDDTHHMM
+                timestamp = timestamp + "00"
+        
+        return timestamp
+    
+    # If regex pattern didn't match, try simpler pattern for date-only or compact format
+    if not match:
+        # Try simpler pattern for date-only or compact format
+        # Remove all non-digit and non-T characters, check if it looks like timestamp
+        cleaned = re.sub(r'[^\dT]', '', subject.upper())
+        
+        # Check if it has at least 8 digits (date) and looks timestamp-like
+        digits_only = cleaned.replace('T', '')
+        if len(digits_only) < 8:
+            return None
+        
+        # Ensure T is between date and time if not present and we have time digits
+        if 'T' not in cleaned and len(digits_only) > 8:
+            cleaned = digits_only[:8] + 'T' + digits_only[8:]
+        elif 'T' not in cleaned:
+            # Date only - add default time
+            cleaned = digits_only[:8] + 'T000000'
+        
+        # Remove trailing 0000 if present (exactly 4 zeros)
+        if cleaned.endswith('0000'):
+            cleaned = cleaned[:-4]
+        
+        # Validate format: should be YYYYMMDDTHHMMSS or YYYYMMDDTHHMM
+        if len(cleaned) == 15:  # YYYYMMDDTHHMMSS
+            return cleaned
+        elif len(cleaned) == 13:  # YYYYMMDDTHHMM
+            return cleaned + "00"  # Add seconds
+        elif len(cleaned) == 11:  # YYYYMMDDTHH (just hours)
+            return cleaned + "0000"  # Add minutes and seconds
+        elif len(cleaned) == 8:  # YYYYMMDD only
+            return cleaned + "T000000"  # Add default time
+        else:
+            return None
+    
+    # Extract components from matched pattern
+    year = match.group(1)
+    month = match.group(2)
+    day = match.group(3)
+    hour = match.group(4) if match.group(4) else "00"
+    minute = match.group(5) if match.group(5) else "00"
+    second = match.group(6) if match.group(6) else "00"
+    
+    # Build timestamp: YYYYMMDDTHHMMSS
+    timestamp = f"{year}{month}{day}T{hour}{minute}{second}"
+    
+    # Remove trailing 0000 if present (exactly 4 zeros)
+    if timestamp.endswith('0000'):
+        timestamp = timestamp[:-4]
+        # If we removed seconds, add back "00" to maintain format
+        if len(timestamp) == 13:  # YYYYMMDDTHHMM
+            timestamp = timestamp + "00"
+    
+    return timestamp
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -283,9 +390,23 @@ def _parse_email_message(message: EmailMessage, size_hint: int) -> ParsedEmail:
         attachments=_parse_attachments(message),
         email_size=size_hint,
     )
-    # Subject ID should be from Date Reported (formatted as YYYYMMDDTHHMMSS)
-    # Fall back to "Subject:" field from body only if Date Reported is not available
-    parsed.subject_id = _build_subject_id(parsed.date_reported) or body_fields.get("subject")
+    # Subject ID priority:
+    # 1. Date Reported from body (formatted as YYYYMMDDTHHMMSS)
+    # 2. Email Subject header as timestamp (cleaned and formatted)
+    # 3. "Subject:" field from body (fallback)
+    subject_id = _build_subject_id(parsed.date_reported)
+    
+    if not subject_id:
+        # Try to extract timestamp from email Subject header
+        cleaned_timestamp = _clean_timestamp_from_subject(parsed.subject)
+        if cleaned_timestamp:
+            subject_id = cleaned_timestamp
+    
+    if not subject_id:
+        # Final fallback: body Subject field
+        subject_id = body_fields.get("subject")
+    
+    parsed.subject_id = subject_id
     return parsed
 
 
@@ -419,9 +540,23 @@ def parse_msg_file(path: Path) -> ParsedEmail:
         attachments=attachments,
         email_size=path.stat().st_size,
     )
-    # Subject ID should be from Date Reported (formatted as YYYYMMDDTHHMMSS)
-    # Fall back to "Subject:" field from body only if Date Reported is not available
-    parsed.subject_id = _build_subject_id(parsed.date_reported) or body_fields.get("subject")
+    # Subject ID priority:
+    # 1. Date Reported from body (formatted as YYYYMMDDTHHMMSS)
+    # 2. Email Subject header as timestamp (cleaned and formatted)
+    # 3. "Subject:" field from body (fallback)
+    subject_id = _build_subject_id(parsed.date_reported)
+    
+    if not subject_id:
+        # Try to extract timestamp from email Subject header
+        cleaned_timestamp = _clean_timestamp_from_subject(parsed.subject)
+        if cleaned_timestamp:
+            subject_id = cleaned_timestamp
+    
+    if not subject_id:
+        # Final fallback: body Subject field
+        subject_id = body_fields.get("subject")
+    
+    parsed.subject_id = subject_id
     return parsed
 
 
