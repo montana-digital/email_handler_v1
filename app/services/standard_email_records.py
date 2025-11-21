@@ -9,19 +9,11 @@ from typing import Dict, Iterable, List, Optional
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.models import Attachment, InputEmail, StandardEmail
+from app.utils.json_helpers import safe_json_loads_list
 
 
-def _parse_json_list(value: str | None) -> list[str]:
-    """Decode a JSON list stored in a text column."""
-    if not value:
-        return []
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return []
-    if isinstance(parsed, list):
-        return [str(item) for item in parsed if item]
-    return []
+# Use centralized JSON utility
+_parse_json_list = safe_json_loads_list
 
 
 def _classify_attachment(attachment: Attachment) -> str:

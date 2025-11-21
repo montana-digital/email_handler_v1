@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.db.models import KnowledgeDomain, KnowledgeTableMetadata, KnowledgeTN, InputEmail
 from app.parsers.parser_phones import extract_phone_numbers
 from app.parsers.parser_urls import extract_urls
+from app.utils.error_handling import format_database_error
 
 
 @dataclass
@@ -54,6 +55,7 @@ def normalize_phone_number(phone: str) -> Optional[str]:
             return results[0].e164
     except Exception as exc:
         logger.warning("Failed to normalize phone number '%s': %s", phone, exc)
+        # Return None to indicate normalization failure - caller should handle this
     
     return None
 
@@ -294,8 +296,16 @@ def upload_knowledge_data(
             # Normalize based on table type
             if table_name == "Knowledge_TNs":
                 pk_value = normalize_phone_number(pk_value_raw)
+                if not pk_value:
+                    records_skipped += 1
+                    errors.append(f"Row {idx + 1}: Failed to normalize phone number '{pk_value_raw}'")
+                    continue
             else:  # Knowledge_Domains
                 pk_value = normalize_domain(pk_value_raw)
+                if not pk_value:
+                    records_skipped += 1
+                    errors.append(f"Row {idx + 1}: Failed to normalize domain '{pk_value_raw}'")
+                    continue
             
             if not pk_value:
                 records_skipped += 1
@@ -328,30 +338,67 @@ def upload_knowledge_data(
                 errors.append(f"Row {idx + 1}: Invalid data types (cannot serialize to JSON): {exc}")
                 continue
             
-            # Check if record exists
-            existing = (
-                session.query(table_class)
-                .filter(table_class.primary_key_value == pk_value)
-                .first()
-            )
-            
-            if existing:
-                # Update existing record
-                existing.data = data_dict
-                existing.updated_at = datetime.now()
-            else:
-                # Create new record
-                new_record = table_class(
-                    primary_key_value=pk_value,
-                    data=data_dict,
+            # Use merge pattern to handle race conditions (check-then-insert)
+            # This avoids IntegrityError if another process inserts between check and insert
+            try:
+                # Check if record exists
+                existing = (
+                    session.query(table_class)
+                    .filter(table_class.primary_key_value == pk_value)
+                    .first()
                 )
-                session.add(new_record)
-            
-            records_added += 1
+                
+                if existing:
+                    # Update existing record
+                    existing.data = data_dict
+                    existing.updated_at = datetime.now()
+                else:
+                    # Create new record
+                    new_record = table_class(
+                        primary_key_value=pk_value,
+                        data=data_dict,
+                    )
+                    session.add(new_record)
+                
+                records_added += 1
+            except Exception as db_exc:
+                # Handle unique constraint violations (race condition)
+                from sqlalchemy.exc import IntegrityError
+                if isinstance(db_exc, IntegrityError) and "primary_key_value" in str(db_exc).lower():
+                    # Another process inserted between our check and insert
+                    # Try to update the existing record
+                    try:
+                        existing = (
+                            session.query(table_class)
+                            .filter(table_class.primary_key_value == pk_value)
+                            .first()
+                        )
+                        if existing:
+                            existing.data = data_dict
+                            existing.updated_at = datetime.now()
+                            records_added += 1
+                            logger.debug("Handled race condition for primary_key_value %s", pk_value)
+                        else:
+                            raise  # Re-raise if we still can't find it
+                    except Exception:
+                        records_skipped += 1
+                        error_msg = format_database_error(db_exc, f"process row {idx + 1}")
+                        errors.append(f"Row {idx + 1}: Database error (race condition) - {error_msg}")
+                        logger.warning("Failed to handle race condition for row %d: %s", idx + 1, db_exc)
+                        continue
+                else:
+                    # Re-raise other exceptions with formatted error
+                    error_msg = format_database_error(db_exc, f"save row {idx + 1}")
+                    raise ValueError(error_msg) from db_exc
             
         except Exception as exc:
             records_skipped += 1
-            error_msg = f"Row {idx + 1}: {str(exc)}"
+            # Format error message based on exception type
+            if isinstance(exc, ValueError):
+                error_msg = f"Row {idx + 1}: {str(exc)}"
+            else:
+                error_msg = format_database_error(exc, f"process row {idx + 1}")
+                error_msg = f"Row {idx + 1}: {error_msg}"
             errors.append(error_msg)
             logger.exception("Error processing row %d: %s", idx + 1, exc)
             continue
@@ -451,13 +498,8 @@ def add_knowledge_to_emails(
             
             # Match phone numbers
             if tn_metadata and tn_selected:
-                try:
-                    phone_numbers = json.loads(email.callback_number_parsed or "[]")
-                    if not isinstance(phone_numbers, list):
-                        phone_numbers = []
-                except (json.JSONDecodeError, TypeError) as exc:
-                    logger.warning("Failed to parse phone numbers for email %d: %s", email.id, exc)
-                    phone_numbers = []
+                from app.utils.json_helpers import safe_json_loads_list
+                phone_numbers = safe_json_loads_list(email.callback_number_parsed)
                 
                 for phone in phone_numbers:
                     if not phone or not isinstance(phone, str):
@@ -482,13 +524,8 @@ def add_knowledge_to_emails(
             
             # Match domains
             if domain_metadata and domain_selected:
-                try:
-                    domains = json.loads(email.url_parsed or "[]")
-                    if not isinstance(domains, list):
-                        domains = []
-                except (json.JSONDecodeError, TypeError) as exc:
-                    logger.warning("Failed to parse domains for email %d: %s", email.id, exc)
-                    domains = []
+                from app.utils.json_helpers import safe_json_loads_list
+                domains = safe_json_loads_list(email.url_parsed)
                 
                 for domain in domains:
                     if not domain or not isinstance(domain, str):

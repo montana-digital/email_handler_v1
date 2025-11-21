@@ -18,6 +18,7 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.config import AppConfig, load_config
+from app.utils.json_helpers import safe_json_loads_list
 from app.db.models import InputEmail, KnowledgeTableMetadata
 from app.utils import sha256_file
 
@@ -61,15 +62,8 @@ def _format_datetime(value: Optional[datetime]) -> str:
 
 
 def _decode_json_list(payload: Optional[str]) -> List[str]:
-    if not payload:
-        return []
-    try:
-        data = json.loads(payload)
-        if isinstance(data, list):
-            return [str(item) for item in data]
-    except json.JSONDecodeError:
-        logger.debug("Failed to decode JSON payload: %s", payload)
-    return []
+    """Decode JSON list - now uses centralized utility."""
+    return safe_json_loads_list(payload)
 
 
 def _compress_to_zip(files: Iterable[Tuple[str, bytes]]) -> bytes:

@@ -17,7 +17,11 @@ from app.db.models import Attachment, InputEmail, OriginalAttachment, OriginalEm
 from app.db.repositories import find_input_email_by_hash, register_pickle_batch, upsert_input_email
 from app.parsers import ParsedAttachment
 from app.services.parsing import detect_candidate, run_parsing_pipeline
+from app.services.shared import apply_parsed_email_to_input, build_pickle_payload, summarize_parser_failures
 from app.utils import sha256_digest
+from app.utils.error_handling import format_database_error
+from app.utils.file_operations import read_bytes_safe, write_bytes_safe
+from app.utils.json_helpers import safe_json_loads_list
 from app.utils.path_validation import validate_path_length
 
 ATTACHMENT_ROOT = "attachments"
@@ -72,57 +76,23 @@ def _save_attachment(config: AppConfig, email_hash: str, attachment: ParsedAttac
         destination = attachment_dir / safe_name
         logger.warning("Attachment path too long, truncated filename: %s", safe_name)
     
-    destination.write_bytes(attachment.payload)
+    try:
+        write_bytes_safe(destination, attachment.payload, atomic=True)
+    except Exception as exc:
+        logger.error("Failed to write attachment %s to %s: %s", attachment.file_name, destination, exc)
+        raise
+    
     return destination
 
 
 def _input_email_from_parsed(email_hash: str, parsed, file_name: str | None = None, use_date_sent_for_original: bool = False) -> InputEmail:
     email = InputEmail(email_hash=email_hash)
-    _apply_parsed_email(email, parsed, file_name=file_name, use_date_sent_for_original=use_date_sent_for_original)
+    apply_parsed_email_to_input(email, parsed, file_name=file_name, use_date_sent_for_original=use_date_sent_for_original)
     return email
 
 
-def _apply_parsed_email(target: InputEmail, parsed, file_name: str | None = None, use_date_sent_for_original: bool = False) -> None:
-    target.parse_status = "success"
-    target.parse_error = None
-    
-    # Check if filename contains 'original' and feature is enabled
-    if use_date_sent_for_original and file_name and "original" in file_name.lower():
-        # Use Date Sent as Subject ID (formatted as YYYYMMDDTHHMMSS)
-        if parsed.date_sent:
-            target.subject_id = parsed.date_sent.strftime("%Y%m%dT%H%M%S")
-            logger.info("Using Date Sent as Subject ID for file with 'original' in name: %s -> %s", file_name, target.subject_id)
-        else:
-            # Fallback to parsed subject_id if date_sent is not available
-            target.subject_id = parsed.subject_id
-            logger.warning("File '%s' contains 'original' but Date Sent is not available, using parsed Subject ID", file_name)
-    else:
-        target.subject_id = parsed.subject_id
-    
-    target.sender = parsed.sender
-    target.cc = json.dumps(parsed.cc)
-    target.subject = parsed.subject
-    target.date_sent = parsed.date_sent
-    target.date_reported = parsed.date_reported
-    target.sending_source_raw = parsed.sending_source_raw
-    target.sending_source_parsed = json.dumps(parsed.sending_source_parsed)
-    target.url_raw = json.dumps(parsed.urls_raw)
-    target.url_parsed = json.dumps(parsed.urls_parsed)
-    target.callback_number_raw = json.dumps(parsed.callback_numbers_raw)
-    target.callback_number_parsed = json.dumps(parsed.callback_numbers_parsed)
-    target.additional_contacts = parsed.additional_contacts
-    target.model_confidence = parsed.model_confidence
-    target.message_id = parsed.message_id
-    target.image_base64 = parsed.image_base64
-    # Store full email body as HTML - prefer HTML, but if only text available, preserve it
-    # The body_html field should contain the complete email body content
-    if parsed.body_html:
-        target.body_html = parsed.body_html
-    elif parsed.body_text:
-        # If only text is available, wrap it in basic HTML to preserve formatting
-        target.body_html = f"<pre>{parsed.body_text}</pre>"
-    else:
-        target.body_html = None
+# Re-export shared function for backward compatibility
+_apply_parsed_email = apply_parsed_email_to_input
 
 
 def _build_failed_email_stub(email_hash: str, file_name: str, error: str) -> InputEmail:
@@ -163,60 +133,12 @@ def _create_attachment_models(
     return models
 
 
-def _prepare_pickle_payload(emails: Iterable[InputEmail]) -> List[dict]:
-    payload = []
-    for email in emails:
-        payload.append(
-            {
-                "id": email.id,
-                "email_hash": email.email_hash,
-                "subject": email.subject,
-                "subject_id": email.subject_id,
-                "sender": email.sender,
-                "date_sent": email.date_sent.isoformat() if email.date_sent else None,
-                "date_reported": email.date_reported.isoformat() if email.date_reported else None,
-                # Maintain backward compatibility with "urls" and "callback_numbers"
-                "urls": json.loads(email.url_parsed or "[]"),
-                "urls_raw": json.loads(email.url_raw or "[]"),
-                "urls_parsed": json.loads(email.url_parsed or "[]"),
-                "callback_numbers": json.loads(email.callback_number_parsed or "[]"),
-                "callback_numbers_raw": json.loads(email.callback_number_raw or "[]"),
-                "callback_numbers_parsed": json.loads(email.callback_number_parsed or "[]"),
-                "sending_source_raw": email.sending_source_raw,
-                "sending_source_parsed": json.loads(email.sending_source_parsed or "[]"),
-                "additional_contacts": email.additional_contacts,
-                "model_confidence": email.model_confidence,
-                "message_id": email.message_id,
-                "body_html": email.body_html,
-            }
-        )
-    return payload
+# Use shared pickle payload building function
+_prepare_pickle_payload = build_pickle_payload
 
 
-def _summarize_failures(attempts) -> str:
-    """Summarize parser failures with user-friendly messages."""
-    messages = []
-    for attempt in attempts:
-        if attempt.status == "failed" and attempt.error_message:
-            error_msg = attempt.error_message
-            
-            # Convert technical parser errors to user-friendly messages
-            if "codec" in error_msg.lower() and "decode" in error_msg.lower():
-                messages.append("Email encoding issue - file may be corrupted or in unsupported format")
-            elif "extract-msg" in error_msg.lower() or "extract_msg" in error_msg.lower():
-                messages.append("MSG parser unavailable - install 'extract-msg' package")
-            elif "mailparser" in error_msg.lower():
-                messages.append("Advanced parser unavailable - install 'mail-parser' package (optional)")
-            elif "does not resemble an email" in error_msg.lower():
-                messages.append("File does not appear to be a valid email")
-            else:
-                # Keep original message but truncate if too long
-                clean_msg = error_msg[:150] + "..." if len(error_msg) > 150 else error_msg
-                messages.append(f"{attempt.name}: {clean_msg}")
-    
-    if messages:
-        return "; ".join(messages)
-    return "No parser strategy available - check that email file is valid"
+# Re-export shared function for backward compatibility
+_summarize_failures = summarize_parser_failures
 
 
 def _infer_mime_type(candidate) -> str:
@@ -300,7 +222,7 @@ def ingest_emails(
                 )
                 continue
             
-            original_bytes = file_path.read_bytes()
+            original_bytes = read_bytes_safe(file_path)
         except Exception as exc:
             logger.exception("Failed to read %s: %s", file_path, exc)
             skipped.append(_format_user_error(exc, file_path.name))
@@ -328,20 +250,38 @@ def ingest_emails(
                 input_email.parse_status = "success"
                 input_email.parse_error = None
             else:
-                error_summary = _summarize_failures(outcome.attempts) or "Unknown parser failure"
+                error_summary = summarize_parser_failures(outcome.attempts) or "Unknown parser failure"
                 input_email = _build_failed_email_stub(email_hash, file_path.name, error_summary)
                 failures.append(f"{file_path.name}: {error_summary}")
 
-            session.merge(
-                OriginalEmail(
-                    email_hash=email_hash,
-                    file_name=file_path.name,
-                    mime_type=_infer_mime_type(candidate),
-                    content=original_bytes,
+            try:
+                session.merge(
+                    OriginalEmail(
+                        email_hash=email_hash,
+                        file_name=file_path.name,
+                        mime_type=_infer_mime_type(candidate),
+                        content=original_bytes,
+                    )
                 )
-            )
+            except Exception as exc:
+                logger.error("Failed to merge OriginalEmail for %s: %s", file_path.name, exc)
+                skipped.append(f"{file_path.name}: Database error saving original email - {format_database_error(exc, 'save original email')}")
+                continue
 
-            upsert_input_email(session, input_email)
+            try:
+                input_email = upsert_input_email(session, input_email)
+            except Exception as exc:
+                logger.error("Failed to upsert InputEmail for %s: %s", file_path.name, exc)
+                skipped.append(f"{file_path.name}: Database error saving email record - {format_database_error(exc, 'save email record')}")
+                continue
+            
+            # Flush to ensure the email is persisted and we can check for existing attachments
+            try:
+                session.flush()
+            except Exception as exc:
+                logger.error("Failed to flush session for %s: %s", file_path.name, exc)
+                skipped.append(f"{file_path.name}: Database error flushing changes - {format_database_error(exc, 'flush database changes')}")
+                continue
 
             if outcome.parsed_email:
                 parsed = outcome.parsed_email
@@ -361,28 +301,55 @@ def ingest_emails(
                     else:
                         valid_attachments.append(attachment)
                 
-                attachment_models = _create_attachment_models(cfg, email_hash, input_email, valid_attachments)
-                session.add_all(attachment_models)
-                for attachment in valid_attachments:
-                    session.add(
-                        OriginalAttachment(
-                            email_hash=email_hash,
-                            file_name=attachment.file_name,
-                            mime_type=attachment.content_type,
-                            content=attachment.payload,
-                        )
+                # Check for existing attachments to avoid unique constraint violations
+                existing_attachment_filenames = {
+                    att.file_name for att in (input_email.attachments or [])
+                }
+                
+                # Only create attachments that don't already exist
+                new_attachments = [
+                    att for att in valid_attachments
+                    if att.file_name not in existing_attachment_filenames
+                ]
+                
+                if new_attachments:
+                    try:
+                        attachment_models = _create_attachment_models(cfg, email_hash, input_email, new_attachments)
+                        session.add_all(attachment_models)
+                        for attachment in new_attachments:
+                            session.add(
+                                OriginalAttachment(
+                                    email_hash=email_hash,
+                                    file_name=attachment.file_name,
+                                    mime_type=attachment.content_type,
+                                    content=attachment.payload,
+                                )
+                            )
+                    except Exception as exc:
+                        logger.error("Failed to save attachments for %s: %s", file_path.name, exc)
+                        skipped.append(f"{file_path.name}: Database error saving attachments - {format_database_error(exc, 'save attachments')}")
+                        # Continue without attachments rather than failing entire email
+                elif valid_attachments:
+                    # All attachments already exist, log but don't error
+                    logger.debug(
+                        "All attachments for email %s already exist, skipping attachment creation",
+                        email_hash
                     )
 
-            for attempt in outcome.attempts:
-                session.add(
-                    ParserRun(
-                        input_email=input_email,
-                        parser_name=attempt.name,
-                        version=attempt.version,
-                        status=attempt.status,
-                        error_message=attempt.error_message,
+            try:
+                for attempt in outcome.attempts:
+                    session.add(
+                        ParserRun(
+                            input_email=input_email,
+                            parser_name=attempt.name,
+                            version=attempt.version,
+                            status=attempt.status,
+                            error_message=attempt.error_message,
+                        )
                     )
-                )
+            except Exception as exc:
+                logger.warning("Failed to save parser runs for %s: %s", file_path.name, exc)
+                # Continue even if parser runs fail - email is still ingested
 
             ingested_emails.append(input_email)
         except Exception as exc:  # noqa: BLE001
@@ -397,26 +364,75 @@ def ingest_emails(
     if not ingested_emails and (skipped or failures):
         return IngestionResult(batch=None, email_ids=[], skipped=skipped, failures=failures)
 
-    session.flush()
+    # Create batch and pickle file
+    try:
+        session.flush()
+    except Exception as exc:
+        logger.error("Failed to flush session before batch creation: %s", exc)
+        # Return partial result - emails are saved but no batch
+        return IngestionResult(
+            batch=None,
+            email_ids=[email.id for email in ingested_emails],
+            skipped=skipped + [f"Batch creation failed: {format_database_error(exc, 'create batch')}"],
+            failures=failures,
+        )
 
-    pickle_payload = _prepare_pickle_payload(ingested_emails)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    batch_label = batch_name or f"batch_{timestamp}"
-    pickle_path = cfg.pickle_cache_dir / f"{batch_label}.pkl"
-    with pickle_path.open("wb") as handle:
-        pickle.dump(pickle_payload, handle)
+    try:
+        pickle_payload = _prepare_pickle_payload(ingested_emails)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        batch_label = batch_name or f"batch_{timestamp}"
+        pickle_path = cfg.pickle_cache_dir / f"{batch_label}.pkl"
+        
+        # Use atomic write utility for pickle file
+        try:
+            pickle_bytes = pickle.dumps(pickle_payload)
+        except (MemoryError, pickle.PicklingError) as exc:
+            logger.error("Failed to serialize pickle payload for batch %s: %s", batch_label, exc)
+            skipped.append(f"Batch pickle file serialization failed: {format_database_error(exc, 'serialize pickle file')}")
+            # Return partial result without batch
+            return IngestionResult(
+                batch=None,
+                email_ids=[email.id for email in ingested_emails],
+                skipped=skipped,
+                failures=failures,
+            )
+        write_bytes_safe(pickle_path, pickle_bytes, atomic=True)
+    except Exception as exc:
+        logger.error("Failed to create pickle file for batch: %s", exc)
+        skipped.append(f"Batch pickle file creation failed: {format_database_error(exc, 'create pickle file')}")
+        # Return partial result without batch
+        return IngestionResult(
+            batch=None,
+            email_ids=[email.id for email in ingested_emails],
+            skipped=skipped,
+            failures=failures,
+        )
 
-    pickle_batch = PickleBatch(
-        batch_name=batch_label,
-        file_path=str(pickle_path),
-        record_count=len(ingested_emails),
-        status="draft",
-    )
-    register_pickle_batch(session, pickle_batch)
-    for email in ingested_emails:
-        email.pickle_batch = pickle_batch
+    try:
+        pickle_batch = PickleBatch(
+            batch_name=batch_label,
+            file_path=str(pickle_path),
+            record_count=len(ingested_emails),
+            status="draft",
+        )
+        register_pickle_batch(session, pickle_batch)
+        for email in ingested_emails:
+            email.pickle_batch = pickle_batch
+        
+        # Don't commit here - let the caller (session_scope) handle commits
+        # This prevents double-commit issues when called from within session_scope()
+        session.flush()
+    except Exception as exc:
+        logger.error("Failed to register pickle batch: %s", exc)
+        skipped.append(f"Batch registration failed: {format_database_error(exc, 'register batch')}")
+        # Return partial result without batch
+        return IngestionResult(
+            batch=None,
+            email_ids=[email.id for email in ingested_emails],
+            skipped=skipped,
+            failures=failures,
+        )
 
-    session.commit()
     logger.info("Ingested %d emails into batch %s", len(ingested_emails), batch_label)
 
     return IngestionResult(

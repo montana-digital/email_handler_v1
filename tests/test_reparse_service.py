@@ -47,6 +47,8 @@ def test_reparse_updates_failed_email(db_session):
     result = reparse_email(db_session, input_email.id)
     assert result is not None
     assert result.success
+    # Flush to ensure changes are visible before refresh
+    db_session.flush()
     db_session.refresh(input_email)
     assert input_email.parse_status == "success"
     assert input_email.subject == "Security Alert"
@@ -81,3 +83,24 @@ def test_reparse_preserves_failure_on_bad_content(db_session):
     assert input_email.parse_status == "failed"
     assert input_email.parse_error
 
+
+def test_reparse_validates_email_id(db_session):
+    """Test that reparse_email validates email_id input."""
+    import pytest
+    from app.services.reparse import reparse_email
+    
+    # Test invalid email_id (None)
+    with pytest.raises(ValueError, match="Email ID is required"):
+        reparse_email(db_session, None)
+    
+    # Test invalid email_id (negative)
+    with pytest.raises(ValueError, match="Email ID must be a positive integer"):
+        reparse_email(db_session, -1)
+    
+    # Test invalid email_id (zero)
+    with pytest.raises(ValueError, match="Email ID must be a positive integer"):
+        reparse_email(db_session, 0)
+    
+    # Test invalid email_id (wrong type)
+    with pytest.raises(ValueError):
+        reparse_email(db_session, "not_an_int")

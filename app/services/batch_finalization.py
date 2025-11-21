@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.config import AppConfig, load_config
 from app.db.models import PickleBatch
+from app.utils.file_operations import move_file_safe
 
 ARCHIVE_SUBDIR = "batches"
 
@@ -43,7 +44,7 @@ def _archive_pickle(batch: PickleBatch, config: AppConfig) -> Optional[Path]:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     destination = archive_dir / f"{batch.batch_name}_{timestamp}.pkl"
 
-    shutil.move(str(source_path), destination)
+    move_file_safe(source_path, destination, create_parents=True)
     return destination
 
 
@@ -77,8 +78,9 @@ def finalize_batch(
     if archived_path:
         batch.file_path = str(archived_path)
 
+    # Don't commit here - let the caller (session_scope) handle commits
+    # This prevents double-commit issues when called from within session_scope()
     session.add(batch)
-    session.commit()
 
     logger.info(
         "Finalized batch %s (%s). status=%s archived=%s",

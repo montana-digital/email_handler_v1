@@ -305,58 +305,37 @@ def _clean_timestamp_from_subject(subject: str | None) -> Optional[str]:
         return timestamp
     
     # If regex pattern didn't match, try simpler pattern for date-only or compact format
-    if not match:
-        # Try simpler pattern for date-only or compact format
-        # Remove all non-digit and non-T characters, check if it looks like timestamp
-        cleaned = re.sub(r'[^\dT]', '', subject.upper())
-        
-        # Check if it has at least 8 digits (date) and looks timestamp-like
-        digits_only = cleaned.replace('T', '')
-        if len(digits_only) < 8:
-            return None
-        
-        # Ensure T is between date and time if not present and we have time digits
-        if 'T' not in cleaned and len(digits_only) > 8:
-            cleaned = digits_only[:8] + 'T' + digits_only[8:]
-        elif 'T' not in cleaned:
-            # Date only - add default time
-            cleaned = digits_only[:8] + 'T000000'
-        
-        # Remove trailing 0000 if present (exactly 4 zeros)
-        if cleaned.endswith('0000'):
-            cleaned = cleaned[:-4]
-        
-        # Validate format: should be YYYYMMDDTHHMMSS or YYYYMMDDTHHMM
-        if len(cleaned) == 15:  # YYYYMMDDTHHMMSS
-            return cleaned
-        elif len(cleaned) == 13:  # YYYYMMDDTHHMM
-            return cleaned + "00"  # Add seconds
-        elif len(cleaned) == 11:  # YYYYMMDDTHH (just hours)
-            return cleaned + "0000"  # Add minutes and seconds
-        elif len(cleaned) == 8:  # YYYYMMDD only
-            return cleaned + "T000000"  # Add default time
-        else:
-            return None
+    # Try simpler pattern for date-only or compact format
+    # Remove all non-digit and non-T characters, check if it looks like timestamp
+    cleaned = re.sub(r'[^\dT]', '', subject.upper())
     
-    # Extract components from matched pattern
-    year = match.group(1)
-    month = match.group(2)
-    day = match.group(3)
-    hour = match.group(4) if match.group(4) else "00"
-    minute = match.group(5) if match.group(5) else "00"
-    second = match.group(6) if match.group(6) else "00"
+    # Check if it has at least 8 digits (date) and looks timestamp-like
+    digits_only = cleaned.replace('T', '')
+    if len(digits_only) < 8:
+        return None
     
-    # Build timestamp: YYYYMMDDTHHMMSS
-    timestamp = f"{year}{month}{day}T{hour}{minute}{second}"
+    # Ensure T is between date and time if not present and we have time digits
+    if 'T' not in cleaned and len(digits_only) > 8:
+        cleaned = digits_only[:8] + 'T' + digits_only[8:]
+    elif 'T' not in cleaned:
+        # Date only - add default time
+        cleaned = digits_only[:8] + 'T000000'
     
     # Remove trailing 0000 if present (exactly 4 zeros)
-    if timestamp.endswith('0000'):
-        timestamp = timestamp[:-4]
-        # If we removed seconds, add back "00" to maintain format
-        if len(timestamp) == 13:  # YYYYMMDDTHHMM
-            timestamp = timestamp + "00"
+    if cleaned.endswith('0000'):
+        cleaned = cleaned[:-4]
     
-    return timestamp
+    # Validate format: should be YYYYMMDDTHHMMSS or YYYYMMDDTHHMM
+    if len(cleaned) == 15:  # YYYYMMDDTHHMMSS
+        return cleaned
+    elif len(cleaned) == 13:  # YYYYMMDDTHHMM
+        return cleaned + "00"  # Add seconds
+    elif len(cleaned) == 11:  # YYYYMMDDTHH (just hours)
+        return cleaned + "0000"  # Add minutes and seconds
+    elif len(cleaned) == 8:  # YYYYMMDD only
+        return cleaned + "T000000"  # Add default time
+    else:
+        return None
 
 
 def _dedupe(values: list[str]) -> list[str]:

@@ -15,6 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.models import Attachment, InputEmail, PickleBatch
+from app.utils.file_operations import copy_file_safe
+from app.utils.json_helpers import safe_json_loads_list
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".svg"}
 EMAIL_EXTENSIONS = {".eml", ".msg"}
@@ -147,7 +149,7 @@ def export_attachments(
                 destination_path = category_dir / f"{stem}_{counter}{suffix}"
                 counter += 1
 
-            shutil.copy2(source_path, destination_path)
+            copy_file_safe(source_path, destination_path, create_parents=True)
             results.append(
                 AttachmentExportResult(
                     attachment_id=attachment.id,
@@ -230,6 +232,8 @@ def list_attachment_records(
                 "storage_path": attachment.storage_path,
                 "email_id": email.id,
                 "batch_id": batch.id if batch else None,
+                "created_at": attachment.created_at.isoformat() if attachment.created_at else None,
+                "email_date_sent": email.date_sent.isoformat() if email.date_sent else None,
             }
         )
 
@@ -298,12 +302,7 @@ def generate_image_grid_report(
             # Get URLs from email
             urls = []
             if email:
-                import json
-                try:
-                    url_parsed = json.loads(email.url_parsed or "[]")
-                    urls = url_parsed if isinstance(url_parsed, list) else []
-                except (json.JSONDecodeError, TypeError) as exc:
-                    logger.debug("Failed to parse URLs for email %s: %s", email.id if email else None, exc)
+                urls = safe_json_loads_list(email.url_parsed)
             
             # Read image and convert to base64 for embedding
             image_base64 = None

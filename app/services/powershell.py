@@ -97,10 +97,17 @@ def load_manifest(
     if not path.exists():
         return {}
 
+    from app.utils.json_helpers import safe_json_loads
+    
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Failed to load PowerShell manifest %s: %s", path, exc)
+        file_content = path.read_text(encoding="utf-8")
+        data = safe_json_loads(file_content, default={})
+        if not isinstance(data, dict):
+            logger.warning("PowerShell manifest is not a dictionary, returning empty dict")
+            return {}
+        return data
+    except OSError as exc:
+        logger.warning("Failed to read PowerShell manifest file %s: %s", path, exc)
         return {}
 
     entries: Dict[str, PowerShellScriptInfo] = {}

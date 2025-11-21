@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.config import AppConfig
 from app.db.models import Attachment, InputEmail, KnowledgeTableMetadata
+from app.utils.file_operations import copy_file_safe, write_text_safe
 
 
 @dataclass
@@ -40,15 +42,7 @@ def _get_takedown_csv_fields(email: InputEmail, knowledge_columns: List[str] = N
     Returns:
         Dictionary of field names and values for CSV export
     """
-    import json
-    
-    def _loads(text: Optional[str]) -> List[str]:
-        if not text:
-            return []
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return []
+    from app.utils.json_helpers import safe_json_loads_list as _loads
     
     fields = {
         "id": email.id,
@@ -164,7 +158,7 @@ def _copy_image_with_subjectid_naming(
             dest_path = destination_dir / f"{stem}_{counter}{original_ext}"
             counter += 1
         
-        shutil.copy2(source_path, dest_path)
+        copy_file_safe(source_path, dest_path, create_parents=True)
         logger.debug("Copied image: %s -> %s", source_path, dest_path)
         return dest_path
     except Exception as exc:
@@ -248,8 +242,9 @@ def generate_takedown_bundle(
         # Get all field names from first email (all should have same structure)
         field_names = list(_get_takedown_csv_fields(emails[0], knowledge_columns).keys())
         
-        with csv_path.open("w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=field_names)
+        # Build CSV content in memory, then write atomically
+        with io.StringIO() as buffer:
+            writer = csv.DictWriter(buffer, fieldnames=field_names)
             writer.writeheader()
             
             image_count = 0
@@ -285,6 +280,11 @@ def generate_takedown_bundle(
                         image_count += 1
                     else:
                         skipped_images += 1
+            
+            # Get CSV content from buffer and write atomically
+            csv_content = buffer.getvalue()
+        
+        write_text_safe(csv_path, csv_content, encoding="utf-8", atomic=True)
         
         logger.info(
             "Generated takedown bundle: %s emails, %d images, %d skipped",
