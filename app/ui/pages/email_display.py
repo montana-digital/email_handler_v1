@@ -332,6 +332,14 @@ def _render_ingestion_panel(state: AppState) -> None:
             f"and **{msg_count} MSG** files."
         )
 
+    # Checkbox for 'original' filename feature
+    use_date_sent_for_original = st.checkbox(
+        "Use Date Sent as Subject ID for files containing 'original' in filename",
+        value=st.session_state.get("use_date_sent_for_original", False),
+        key="use_date_sent_for_original",
+        help="When enabled, emails with 'original' in the filename will use their Date Sent field (formatted as YYYYMMDDTHHMMSS) as the Subject ID instead of the parsed Subject ID."
+    )
+    
     col_ingest, col_refresh = st.columns([1, 1])
     with col_ingest:
         if st.button("Ingest New Emails", width="stretch"):
@@ -359,6 +367,7 @@ def _render_ingestion_panel(state: AppState) -> None:
                         session,
                         config=state.config,
                         progress_callback=update_progress,
+                        use_date_sent_for_original=use_date_sent_for_original,
                     )
                 
                 # Clear progress indicators
@@ -765,6 +774,36 @@ def _render_batch_panel(state: AppState) -> None:
 
     with report_col:
         generate_report = st.button("Generate HTML Report", disabled=not report_selection, width="stretch")
+        generate_takedown = st.button("Generate Takedown Bundle", disabled=not report_selection, width="stretch",
+                                     help="Create CSV and images folder for takedown requests")
+    if generate_takedown:
+        with session_scope() as session:
+            from app.services.takedown_bundle import generate_takedown_bundle
+            result = generate_takedown_bundle(
+                session,
+                email_ids=report_selection,
+                config=state.config,
+            )
+        if result:
+            state.add_notification(f"Generated takedown bundle: {result.email_count} emails, {result.image_count} images")
+            st.success(
+                f"Takedown bundle created:\n"
+                f"- Directory: `{result.bundle_dir}`\n"
+                f"- CSV: `{result.csv_path.name}`\n"
+                f"- Images: {result.image_count} images in `{result.images_dir.name}/`\n"
+                f"- Skipped: {result.skipped_images} images"
+            )
+            # Provide download button for CSV
+            csv_content = result.csv_path.read_bytes()
+            st.download_button(
+                label="Download Takedown CSV",
+                data=csv_content,
+                file_name=result.csv_path.name,
+                mime="text/csv",
+                key=f"download_takedown_csv_{result.bundle_dir.name}",
+            )
+        else:
+            st.error("Takedown bundle generation failed. Check logs for details.")
     if generate_report:
         with session_scope() as session:
             artifacts = generate_email_report(

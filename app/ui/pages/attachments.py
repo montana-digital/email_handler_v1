@@ -419,7 +419,7 @@ def render(state: AppState) -> None:
                 st.caption("Select other attachments for different export options")
         else:
             # General export for mixed categories
-            export_cols = st.columns([1, 1])
+            export_cols = st.columns([1, 1, 1])
             with export_cols[0]:
                 if st.button("Export Selected to ZIP", use_container_width=True):
                     destination_root = (
@@ -451,8 +451,52 @@ def render(state: AppState) -> None:
                                 )
                     else:
                         st.warning("No attachments were exported. They may lack storage paths.")
+            
+            with export_cols[1]:
+                if st.button("Generate Takedown Bundle", use_container_width=True,
+                           help="Create CSV and images folder for takedown requests"):
+                    # Get unique email IDs from selected attachments
+                    with session_scope() as session:
+                        from app.db.models import Attachment
+                        attachments = session.query(Attachment).filter(
+                            Attachment.id.in_(selected_ids)
+                        ).all()
+                        # Get unique email IDs
+                        email_ids = list({att.input_email_id for att in attachments if att.input_email_id})
+                        
+                        if email_ids:
+                            from app.services.takedown_bundle import generate_takedown_bundle
+                            result = generate_takedown_bundle(
+                                session,
+                                email_ids=email_ids,
+                                config=state.config,
+                            )
+                            if result:
+                                state.add_notification(
+                                    f"Generated takedown bundle: {result.email_count} emails, {result.image_count} images"
+                                )
+                                st.success(
+                                    f"Takedown bundle created:\n"
+                                    f"- Directory: `{result.bundle_dir}`\n"
+                                    f"- CSV: `{result.csv_path.name}`\n"
+                                    f"- Images: {result.image_count} images in `{result.images_dir.name}/`\n"
+                                    f"- Skipped: {result.skipped_images} images"
+                                )
+                                # Provide download button for CSV
+                                csv_content = result.csv_path.read_bytes()
+                                st.download_button(
+                                    label="Download Takedown CSV",
+                                    data=csv_content,
+                                    file_name=result.csv_path.name,
+                                    mime="text/csv",
+                                    key=f"download_takedown_csv_{result.bundle_dir.name}",
+                                )
+                            else:
+                                st.error("Takedown bundle generation failed. Check logs for details.")
+                        else:
+                            st.warning("No emails found for selected attachments.")
         
-        with export_cols[1]:
+        with export_cols[2]:
             # Copy email attachments to input folder
             email_attachments = [record for record in page_records 
                                 if record["id"] in selected_ids 

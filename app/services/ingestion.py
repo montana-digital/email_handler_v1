@@ -76,16 +76,29 @@ def _save_attachment(config: AppConfig, email_hash: str, attachment: ParsedAttac
     return destination
 
 
-def _input_email_from_parsed(email_hash: str, parsed) -> InputEmail:
+def _input_email_from_parsed(email_hash: str, parsed, file_name: str | None = None, use_date_sent_for_original: bool = False) -> InputEmail:
     email = InputEmail(email_hash=email_hash)
-    _apply_parsed_email(email, parsed)
+    _apply_parsed_email(email, parsed, file_name=file_name, use_date_sent_for_original=use_date_sent_for_original)
     return email
 
 
-def _apply_parsed_email(target: InputEmail, parsed) -> None:
+def _apply_parsed_email(target: InputEmail, parsed, file_name: str | None = None, use_date_sent_for_original: bool = False) -> None:
     target.parse_status = "success"
     target.parse_error = None
-    target.subject_id = parsed.subject_id
+    
+    # Check if filename contains 'original' and feature is enabled
+    if use_date_sent_for_original and file_name and "original" in file_name.lower():
+        # Use Date Sent as Subject ID (formatted as YYYYMMDDTHHMMSS)
+        if parsed.date_sent:
+            target.subject_id = parsed.date_sent.strftime("%Y%m%dT%H%M%S")
+            logger.info("Using Date Sent as Subject ID for file with 'original' in name: %s -> %s", file_name, target.subject_id)
+        else:
+            # Fallback to parsed subject_id if date_sent is not available
+            target.subject_id = parsed.subject_id
+            logger.warning("File '%s' contains 'original' but Date Sent is not available, using parsed Subject ID", file_name)
+    else:
+        target.subject_id = parsed.subject_id
+    
     target.sender = parsed.sender
     target.cc = json.dumps(parsed.cc)
     target.subject = parsed.subject
@@ -246,6 +259,7 @@ def ingest_emails(
     source_paths: Optional[Sequence[Path]] = None,
     batch_name: Optional[str] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    use_date_sent_for_original: bool = False,
 ) -> Optional[IngestionResult]:
     """Process emails from the configured input directory into SQLite and cache."""
     cfg = config or load_config()
@@ -305,7 +319,12 @@ def ingest_emails(
             input_email: InputEmail
             if outcome.parsed_email:
                 parsed = outcome.parsed_email
-                input_email = _input_email_from_parsed(email_hash, parsed)
+                input_email = _input_email_from_parsed(
+                    email_hash, 
+                    parsed, 
+                    file_name=file_path.name,
+                    use_date_sent_for_original=use_date_sent_for_original
+                )
                 input_email.parse_status = "success"
                 input_email.parse_error = None
             else:

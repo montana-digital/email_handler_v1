@@ -12,15 +12,33 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
-THUMBNAIL_MAX_SIZE = (300, 300)
+# Thumbnail size for preview - larger size reduces blurriness when displayed
+THUMBNAIL_MAX_SIZE = (600, 600)
 THUMBNAIL_ASPECT_RATIO = True
+# Quality setting for JPEG thumbnails (1-100, higher = better quality)
+THUMBNAIL_QUALITY = 95
 
 
 def create_thumbnail(image_path: Path, max_size: tuple[int, int] = THUMBNAIL_MAX_SIZE) -> Optional[Image.Image]:
-    """Create a thumbnail from an image file."""
+    """Create a high-quality thumbnail from an image file.
+    
+    Uses LANCZOS resampling for best quality and preserves aspect ratio.
+    """
     try:
         with image_path.open("rb") as fh:
             img = Image.open(fh)
+            # Convert to RGB if necessary (for JPEG compatibility)
+            if img.mode in ("RGBA", "LA", "P"):
+                # Create white background for transparent images
+                background = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode == "P":
+                    img = img.convert("RGBA")
+                background.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                img = background
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
+            
+            # Create thumbnail with high-quality resampling
             img.thumbnail(max_size, Image.Resampling.LANCZOS)
             return img
     except (UnidentifiedImageError, OSError, Exception):
@@ -28,9 +46,24 @@ def create_thumbnail(image_path: Path, max_size: tuple[int, int] = THUMBNAIL_MAX
 
 
 def create_thumbnail_from_bytes(image_bytes: bytes, max_size: tuple[int, int] = THUMBNAIL_MAX_SIZE) -> Optional[Image.Image]:
-    """Create a thumbnail from image bytes."""
+    """Create a high-quality thumbnail from image bytes.
+    
+    Uses LANCZOS resampling for best quality and preserves aspect ratio.
+    """
     try:
         img = Image.open(io.BytesIO(image_bytes))
+        # Convert to RGB if necessary (for JPEG compatibility)
+        if img.mode in ("RGBA", "LA", "P"):
+            # Create white background for transparent images
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "P":
+                img = img.convert("RGBA")
+            background.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+            img = background
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        
+        # Create thumbnail with high-quality resampling
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
         return img
     except (UnidentifiedImageError, OSError, Exception):
@@ -82,25 +115,30 @@ def display_image_with_dialog(
         st.warning(f"Could not create thumbnail: {caption}")
         return
     
-    # Display thumbnail
+    # Display thumbnail with proper sizing
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        # Convert thumbnail to bytes for display
+        # Convert thumbnail to bytes for display with high quality
         buffer = io.BytesIO()
-        thumbnail.save(buffer, format="PNG")
+        # Use JPEG for better quality/size ratio, PNG for transparency
+        if thumbnail.mode == "RGB":
+            thumbnail.save(buffer, format="JPEG", quality=THUMBNAIL_QUALITY, optimize=True)
+        else:
+            thumbnail.save(buffer, format="PNG", optimize=True)
         buffer.seek(0)
         
-        # Show thumbnail
-        st.image(buffer, caption=caption, use_container_width=True)
+        # Show thumbnail with max width constraint to prevent huge display
+        # use_container_width=False and specify width to control size
+        st.image(buffer, caption=caption, use_container_width=False, width=min(thumbnail.width, 600))
         
-        # Use a button to trigger the dialog
+        # Use a button to trigger the full-size view
         dialog_key = f"image_dialog_{key or caption}"
         if st.button("🖼️ View Full Size", key=f"btn_{dialog_key}", use_container_width=True):
-            st.session_state[dialog_key] = True
+            st.session_state[dialog_key] = not st.session_state.get(dialog_key, False)
         
-        # Display full-size image in dialog if button was clicked
+        # Display full-size image in expander if button was clicked
         if st.session_state.get(dialog_key, False):
-            with st.dialog("Full Size Image"):
+            with st.expander("Full Size Image", expanded=True):
                 st.markdown(f"### {caption}")
                 if image_path and image_path.exists():
                     st.image(str(image_path), caption=caption, use_container_width=True)
@@ -117,7 +155,10 @@ def display_image_with_dialog(
                             "WEBP": "WEBP",
                         }
                         img_format = full_image.format or "PNG"
-                        full_image.save(buffer_full, format=img_format)
+                        if img_format == "JPEG" and full_image.mode == "RGB":
+                            full_image.save(buffer_full, format=img_format, quality=95)
+                        else:
+                            full_image.save(buffer_full, format=img_format)
                     except Exception:
                         full_image.save(buffer_full, format="PNG")
                     buffer_full.seek(0)
@@ -158,7 +199,7 @@ def process_html_images(html_content: str, max_thumbnail_size: tuple[int, int] =
                     # Create thumbnail
                     thumbnail = create_thumbnail_from_bytes(image_bytes, max_thumbnail_size)
                     if thumbnail:
-                        # Convert thumbnail to base64
+                        # Convert thumbnail to base64 with high quality
                         buffer = io.BytesIO()
                         # Determine format from mime type
                         format_map = {
@@ -168,23 +209,28 @@ def process_html_images(html_content: str, max_thumbnail_size: tuple[int, int] =
                             "image/gif": "GIF",
                             "image/webp": "WEBP",
                         }
-                        img_format = format_map.get(mime_type, "PNG")
-                        thumbnail.save(buffer, format=img_format)
+                        img_format = format_map.get(mime_type, "JPEG")
+                        # Use high quality for JPEG
+                        if img_format == "JPEG" and thumbnail.mode == "RGB":
+                            thumbnail.save(buffer, format=img_format, quality=THUMBNAIL_QUALITY, optimize=True)
+                        else:
+                            thumbnail.save(buffer, format=img_format, optimize=True)
                         buffer.seek(0)
                         thumbnail_data = base64.b64encode(buffer.read()).decode("utf-8")
                         
                         # Update img tag with thumbnail and add click handler
+                        # Use larger max size for better quality display
                         img["src"] = f"data:{mime_type};base64,{thumbnail_data}"
-                        img["style"] = "cursor: pointer; max-width: 300px; max-height: 300px; object-fit: contain;"
+                        img["style"] = "cursor: pointer; max-width: 600px; max-height: 600px; object-fit: contain; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges;"
                         img["onclick"] = f"showFullImage('{original_src}')"
                         img["title"] = "Click to view full size"
                 except Exception:
                     # If processing fails, just add styling
-                    img["style"] = "max-width: 300px; max-height: 300px; object-fit: contain; cursor: pointer;"
+                    img["style"] = "max-width: 600px; max-height: 600px; object-fit: contain; cursor: pointer; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges;"
                     img["onclick"] = f"showFullImage('{original_src}')"
             else:
                 # Regular image URL - just add styling and click handler
-                img["style"] = "max-width: 300px; max-height: 300px; object-fit: contain; cursor: pointer;"
+                img["style"] = "max-width: 600px; max-height: 600px; object-fit: contain; cursor: pointer; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges;"
                 img["onclick"] = f"showFullImage('{original_src}')"
                 img["title"] = "Click to view full size"
         

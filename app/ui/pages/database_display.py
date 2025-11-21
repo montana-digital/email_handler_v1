@@ -12,6 +12,7 @@ from PIL import Image, UnidentifiedImageError
 from streamlit.components.v1 import html
 
 from app.db.init_db import session_scope
+from app.db.models import StandardEmail
 from app.services.email_exports import (
     build_attachments_zip,
     build_single_email_html,
@@ -19,6 +20,7 @@ from app.services.email_exports import (
 )
 from app.services.reporting import generate_email_report
 from app.services.standard_email_records import get_standard_email_detail, list_standard_email_records
+from app.services.takedown_bundle import generate_takedown_bundle
 from app.ui.state import AppState
 from app.ui.utils.images import display_image_with_dialog, process_html_images
 
@@ -394,20 +396,68 @@ def _render_saved_email_table(state: AppState) -> tuple[list[dict], list[int]]:
         key="standard_report_selection",
     )
 
-    if st.button("Generate HTML Report (Saved Emails)", disabled=not report_selection, width="stretch"):
-        with session_scope() as session:
-            artifacts = generate_email_report(session, report_selection, config=state.config)
-        if artifacts:
-            st.success(f"Generated report {artifacts.html_path.name}")
-            st.session_state["standard_report_artifacts"] = {
-                "html": str(artifacts.html_path),
-                "csv_text": str(artifacts.csv_text_path),
-                "csv_full": str(artifacts.csv_full_path),
-                "attachments_zip": str(artifacts.attachments_zip_path) if artifacts.attachments_zip_path else "",
-                "emails_zip": str(artifacts.emails_zip_path) if artifacts.emails_zip_path else "",
-            }
-        else:
-            st.error("Report generation failed or produced no output.")
+    report_col1, report_col2 = st.columns([1, 1])
+    with report_col1:
+        if st.button("Generate HTML Report (Saved Emails)", disabled=not report_selection, width="stretch"):
+            with session_scope() as session:
+                artifacts = generate_email_report(session, report_selection, config=state.config)
+            if artifacts:
+                st.success(f"Generated report {artifacts.html_path.name}")
+                st.session_state["standard_report_artifacts"] = {
+                    "html": str(artifacts.html_path),
+                    "csv_text": str(artifacts.csv_text_path),
+                    "csv_full": str(artifacts.csv_full_path),
+                    "attachments_zip": str(artifacts.attachments_zip_path) if artifacts.attachments_zip_path else "",
+                    "emails_zip": str(artifacts.emails_zip_path) if artifacts.emails_zip_path else "",
+                }
+            else:
+                st.error("Report generation failed or produced no output.")
+    
+    with report_col2:
+        if st.button("Generate Takedown Bundle", disabled=not report_selection, width="stretch",
+                     help="Create CSV and images folder for takedown requests"):
+            # Map StandardEmail IDs to InputEmail IDs
+            with session_scope() as session:
+                standard_emails = (
+                    session.query(StandardEmail)
+                    .filter(StandardEmail.id.in_(report_selection))
+                    .all()
+                )
+                input_email_ids = [
+                    se.source_input_email_id
+                    for se in standard_emails
+                    if se.source_input_email_id is not None
+                ]
+            
+            if not input_email_ids:
+                st.error("None of the selected emails have linked input emails. Cannot generate takedown bundle.")
+            else:
+                with session_scope() as session:
+                    result = generate_takedown_bundle(
+                        session,
+                        email_ids=input_email_ids,
+                        config=state.config,
+                    )
+                if result:
+                    state.add_notification(f"Generated takedown bundle: {result.email_count} emails, {result.image_count} images")
+                    st.success(
+                        f"Takedown bundle created:\n"
+                        f"- Directory: `{result.bundle_dir}`\n"
+                        f"- CSV: `{result.csv_path.name}`\n"
+                        f"- Images: {result.image_count} images in `{result.images_dir.name}/`\n"
+                        f"- Skipped: {result.skipped_images} images"
+                    )
+                    # Provide download button for CSV
+                    csv_content = result.csv_path.read_bytes()
+                    st.download_button(
+                        label="Download Takedown CSV",
+                        data=csv_content,
+                        file_name=result.csv_path.name,
+                        mime="text/csv",
+                        key="download_takedown_csv_table_db",
+                    )
+                else:
+                    st.error("Failed to generate takedown bundle. Check logs for details.")
 
     artifact_state = st.session_state.get("standard_report_artifacts")
     if artifact_state:
@@ -506,6 +556,41 @@ def _render_saved_email_detail(state: AppState, detail: dict) -> None:
 
         attachments = detail.get("attachments") or []
         _render_download_buttons(detail, attachments, state.config)
+
+        # Generate Takedown Bundle button
+        st.divider()
+        if st.button("Generate Takedown Bundle", key="generate_takedown_bundle_db", width="stretch",
+                     help="Create CSV and images folder for takedown requests"):
+            source_input_email_id = detail.get("source_input_email_id")
+            if not source_input_email_id:
+                st.error("This standard email does not have a linked input email. Cannot generate takedown bundle.")
+            else:
+                with session_scope() as session:
+                    result = generate_takedown_bundle(
+                        session,
+                        email_ids=[source_input_email_id],
+                        config=state.config,
+                    )
+                if result:
+                    state.add_notification(f"Generated takedown bundle: {result.email_count} emails, {result.image_count} images")
+                    st.success(
+                        f"Takedown bundle created:\n"
+                        f"- Directory: `{result.bundle_dir}`\n"
+                        f"- CSV: `{result.csv_path.name}`\n"
+                        f"- Images: {result.image_count} images in `{result.images_dir.name}/`\n"
+                        f"- Skipped: {result.skipped_images} images"
+                    )
+                    # Provide download button for CSV
+                    csv_content = result.csv_path.read_bytes()
+                    st.download_button(
+                        label="Download Takedown CSV",
+                        data=csv_content,
+                        file_name=result.csv_path.name,
+                        mime="text/csv",
+                        key="download_takedown_csv_db",
+                    )
+                else:
+                    st.error("Failed to generate takedown bundle. Check logs for details.")
 
         with st.expander("Body Preview", expanded=False):
             if detail.get("body_html"):
