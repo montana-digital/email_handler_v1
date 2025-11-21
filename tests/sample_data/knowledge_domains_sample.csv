@@ -1,0 +1,7 @@
+domain,registrar,country,status,notes
+https://example.com,GoDaddy,US,Active,Primary domain
+https://test.com,Namecheap,US,Active,Test environment
+https://demo.org,Google Domains,US,Inactive,Old domain
+https://sample.net,Network Solutions,US,Active,Production
+https://example.co.uk,123-Reg,GB,Active,UK branch
+

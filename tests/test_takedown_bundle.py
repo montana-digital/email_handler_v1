@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.orm import Session
 
-from app.db.models import Attachment, InputEmail
+from app.db.models import Attachment, InputEmail, KnowledgeTableMetadata
 from app.services.takedown_bundle import (
     _copy_image_with_subjectid_naming,
     _get_takedown_csv_fields,
@@ -535,4 +535,114 @@ def test_generate_takedown_bundle_csv_association(db_session: Session, tmp_path:
         assert len(parts) == 2
         assert parts[0] == csv_subject_id
         assert parts[1].isdigit()  # Index should be numeric
+
+
+def test_get_takedown_csv_fields_includes_knowledge_columns(db_session: Session):
+    """Test that knowledge columns are included in CSV fields when provided."""
+    email = InputEmail(
+        email_hash="knowledge_test_hash",
+        subject_id="2025-01-27",
+        subject="Knowledge Test Email",
+        sender="knowledge@example.com",
+        knowledge_data={
+            "carrier": "Verizon",
+            "region": "US",
+            "status": "active",
+        },
+    )
+    db_session.add(email)
+    db_session.flush()
+
+    knowledge_columns = ["carrier", "region", "status"]
+    fields = _get_takedown_csv_fields(email, knowledge_columns)
+
+    # Verify knowledge columns are included
+    assert "carrier" in fields
+    assert "region" in fields
+    assert "status" in fields
+    assert fields["carrier"] == "Verizon"
+    assert fields["region"] == "US"
+    assert fields["status"] == "active"
+
+    # Verify standard fields are still present
+    assert "subject_id" in fields
+    assert fields["subject_id"] == "2025-01-27"
+
+
+def test_get_takedown_csv_fields_handles_missing_knowledge_data(db_session: Session):
+    """Test that missing knowledge data returns empty strings for knowledge columns."""
+    email = InputEmail(
+        email_hash="missing_knowledge_test",
+        subject_id="2025-01-28",
+        subject="Missing Knowledge Test",
+        sender="missing@example.com",
+        knowledge_data=None,  # No knowledge data
+    )
+    db_session.add(email)
+    db_session.flush()
+
+    knowledge_columns = ["carrier", "region"]
+    fields = _get_takedown_csv_fields(email, knowledge_columns)
+
+    # Knowledge columns should be present but empty
+    assert "carrier" in fields
+    assert "region" in fields
+    assert fields["carrier"] == ""
+    assert fields["region"] == ""
+
+
+def test_generate_takedown_bundle_includes_knowledge_columns(db_session: Session, tmp_path: Path, temp_config):
+    """Test that takedown bundle CSV includes knowledge columns when metadata exists."""
+    # Create knowledge table metadata
+    tn_metadata = KnowledgeTableMetadata(
+        table_name="Knowledge_TNs",
+        primary_key_column="phone",
+        schema_definition={"phone": "TEXT", "carrier": "TEXT", "region": "TEXT"},
+        selected_columns=["carrier", "region"],
+    )
+    db_session.add(tn_metadata)
+    db_session.flush()
+
+    # Create email with knowledge data
+    email = InputEmail(
+        email_hash="bundle_knowledge_test",
+        subject_id="2025-01-29",
+        subject="Bundle Knowledge Test",
+        sender="bundle@example.com",
+        knowledge_data={
+            "carrier": "AT&T",
+            "region": "US",
+        },
+    )
+    db_session.add(email)
+    db_session.flush()
+
+    # Generate bundle
+    result = generate_takedown_bundle(
+        db_session,
+        email_ids=[email.id],
+        config=temp_config,
+    )
+
+    assert result is not None
+    assert result.csv_path.exists()
+
+    # Verify CSV includes knowledge columns
+    import csv
+    with result.csv_path.open("r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        assert len(rows) == 1
+        
+        # Check knowledge columns are in header
+        assert "carrier" in rows[0]
+        assert "region" in rows[0]
+        
+        # Check values
+        assert rows[0]["carrier"] == "AT&T"
+        assert rows[0]["region"] == "US"
+        
+        # Check standard fields still present
+        assert "subject_id" in rows[0]
+        assert rows[0]["subject_id"] == "2025-01-29"
 

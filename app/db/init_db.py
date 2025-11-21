@@ -128,7 +128,17 @@ def _apply_schema_patches(engine: Engine) -> None:
     inspector = inspect(engine)
 
     def _has_column(table: str, column: str) -> bool:
-        return any(col["name"] == column for col in inspector.get_columns(table))
+        try:
+            return any(col["name"] == column for col in inspector.get_columns(table))
+        except Exception:
+            # Table doesn't exist yet, will be created by create_all
+            return False
+    
+    def _table_exists(table: str) -> bool:
+        try:
+            return table in inspector.get_table_names()
+        except Exception:
+            return False
 
     patches = [
         (
@@ -142,6 +152,11 @@ def _apply_schema_patches(engine: Engine) -> None:
             "ALTER TABLE input_emails ADD COLUMN parse_error TEXT",
         ),
         (
+            "input_emails",
+            "knowledge_data",
+            "ALTER TABLE input_emails ADD COLUMN knowledge_data JSON",
+        ),
+        (
             "parser_runs",
             "error_message",
             "ALTER TABLE parser_runs ADD COLUMN error_message TEXT",
@@ -150,8 +165,12 @@ def _apply_schema_patches(engine: Engine) -> None:
 
     with engine.begin() as connection:
         for table, column, ddl in patches:
-            if not _has_column(table, column):
-                connection.execute(text(ddl))
+            if _table_exists(table) and not _has_column(table, column):
+                try:
+                    connection.execute(text(ddl))
+                    logger.info("Applied schema patch: added column %s.%s", table, column)
+                except Exception as exc:
+                    logger.warning("Failed to apply schema patch for %s.%s: %s", table, column, exc)
 
 
 @contextmanager

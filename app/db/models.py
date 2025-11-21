@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -38,6 +38,7 @@ class InputEmail(Base):
     image_base64: Mapped[Optional[str]] = mapped_column(Text, default=None)
     body_html: Mapped[Optional[str]] = mapped_column(Text, default=None)
     pickle_batch_id: Mapped[Optional[int]] = mapped_column(ForeignKey("pickle_batches.id"), index=True, default=None)
+    knowledge_data: Mapped[Optional[dict]] = mapped_column(JSON, default=None)  # Stores knowledge enrichment data
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -139,4 +140,45 @@ class ParserRun(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, default=None)
 
     input_email: Mapped[InputEmail] = relationship("InputEmail", back_populates="parser_runs")
+
+
+class KnowledgeTableMetadata(Base):
+    """Metadata for Knowledge tables - tracks schema and configuration."""
+    __tablename__ = "knowledge_table_metadata"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    table_name: Mapped[str] = mapped_column(String(100), unique=True)  # "Knowledge_TNs" or "Knowledge_Domains"
+    primary_key_column: Mapped[str] = mapped_column(String(100))  # Column name used as primary key
+    schema_definition: Mapped[dict] = mapped_column(JSON)  # Column names, types, etc.
+    selected_columns: Mapped[Optional[dict]] = mapped_column(JSON, default=None)  # Columns selected for "Add Knowledge"
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class KnowledgeTN(Base):
+    """Knowledge table for Telephone Numbers (TNs)."""
+    __tablename__ = "knowledge_tns"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    primary_key_value: Mapped[str] = mapped_column(String(255), unique=True, index=True)  # Normalized phone number (E.164)
+    data: Mapped[dict] = mapped_column(JSON)  # All other columns stored as JSON
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class KnowledgeDomain(Base):
+    """Knowledge table for Domains/URLs."""
+    __tablename__ = "knowledge_domains"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    primary_key_value: Mapped[str] = mapped_column(String(255), unique=True, index=True)  # Normalized domain
+    data: Mapped[dict] = mapped_column(JSON)  # All other columns stored as JSON
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 

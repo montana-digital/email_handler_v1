@@ -13,7 +13,7 @@ from loguru import logger
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import AppConfig
-from app.db.models import Attachment, InputEmail
+from app.db.models import Attachment, InputEmail, KnowledgeTableMetadata
 
 
 @dataclass
@@ -28,10 +28,17 @@ class TakedownBundleResult:
     skipped_images: int
 
 
-def _get_takedown_csv_fields(email: InputEmail) -> dict:
+def _get_takedown_csv_fields(email: InputEmail, knowledge_columns: List[str] = None) -> dict:
     """Extract fields for CSV export, excluding email_hash, image_base64, and body_html.
     
-    Returns all fields with SubjectID included.
+    Includes knowledge columns from email.knowledge_data if provided.
+    
+    Args:
+        email: InputEmail record
+        knowledge_columns: List of knowledge column names to include
+        
+    Returns:
+        Dictionary of field names and values for CSV export
     """
     import json
     
@@ -43,7 +50,7 @@ def _get_takedown_csv_fields(email: InputEmail) -> dict:
         except json.JSONDecodeError:
             return []
     
-    return {
+    fields = {
         "id": email.id,
         "subject_id": email.subject_id or "",
         "parse_status": email.parse_status or "",
@@ -64,6 +71,27 @@ def _get_takedown_csv_fields(email: InputEmail) -> dict:
         "message_id": email.message_id or "",
         # Note: email_hash, image_base64, and body_html are explicitly excluded
     }
+    
+    # Add knowledge columns if provided
+    if knowledge_columns:
+        knowledge_data = email.knowledge_data or {}
+        if not isinstance(knowledge_data, dict):
+            logger.warning("Invalid knowledge_data type for email %d: %s", email.id, type(knowledge_data))
+            knowledge_data = {}
+        
+        for col in knowledge_columns:
+            try:
+                value = knowledge_data.get(col, "")
+                # Ensure value is serializable for CSV
+                if value is None:
+                    fields[col] = ""
+                else:
+                    fields[col] = str(value)
+            except Exception as exc:
+                logger.warning("Error accessing knowledge column %s for email %d: %s", col, email.id, exc)
+                fields[col] = ""
+    
+    return fields
 
 
 def _is_image_attachment(attachment: Attachment) -> bool:
@@ -188,12 +216,37 @@ def generate_takedown_bundle(
         logger.warning("No emails found for provided IDs")
         return None
     
+    # Get knowledge columns from metadata
+    knowledge_columns = []
+    try:
+        tn_metadata = (
+            session.query(KnowledgeTableMetadata)
+            .filter(KnowledgeTableMetadata.table_name == "Knowledge_TNs")
+            .first()
+        )
+        domain_metadata = (
+            session.query(KnowledgeTableMetadata)
+            .filter(KnowledgeTableMetadata.table_name == "Knowledge_Domains")
+            .first()
+        )
+        
+        if tn_metadata and tn_metadata.selected_columns:
+            knowledge_columns.extend(tn_metadata.selected_columns)
+        if domain_metadata and domain_metadata.selected_columns:
+            knowledge_columns.extend(domain_metadata.selected_columns)
+        
+        # Remove duplicates while preserving order
+        knowledge_columns = list(dict.fromkeys(knowledge_columns))
+    except Exception as exc:
+        logger.warning("Failed to fetch knowledge columns: %s", exc)
+        knowledge_columns = []
+    
     # Generate CSV
     csv_path = bundle_dir / "takedown_data.csv"
     
     try:
         # Get all field names from first email (all should have same structure)
-        field_names = list(_get_takedown_csv_fields(emails[0]).keys())
+        field_names = list(_get_takedown_csv_fields(emails[0], knowledge_columns).keys())
         
         with csv_path.open("w", newline="", encoding="utf-8") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=field_names)
@@ -204,7 +257,7 @@ def generate_takedown_bundle(
             
             for email in emails:
                 # Write CSV row (excluding email_hash and image_base64)
-                row_data = _get_takedown_csv_fields(email)
+                row_data = _get_takedown_csv_fields(email, knowledge_columns)
                 writer.writerow(row_data)
                 
                 # Copy associated images

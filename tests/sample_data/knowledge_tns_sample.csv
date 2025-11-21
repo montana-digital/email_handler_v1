@@ -1,0 +1,7 @@
+phone,carrier,region,status,notes
++15551234567,Verizon,NY,Active,Primary contact
++15551234568,AT&T,CA,Active,Secondary contact
++15551234569,T-Mobile,TX,Inactive,Old number
++15551234570,Verizon,FL,Active,New account
++15551234571,Sprint,IL,Active,Corporate line
+

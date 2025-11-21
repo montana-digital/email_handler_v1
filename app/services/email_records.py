@@ -54,6 +54,7 @@ def _serialize_email(email: InputEmail) -> Dict:
         "body_html": email.body_html,
         "image_base64": email.image_base64,
         "pickle_batch_id": email.pickle_batch_id,
+        "knowledge_data": email.knowledge_data or {},
         "attachments": [
             {
                 "id": attachment.id,

@@ -662,8 +662,36 @@ def _render_batch_panel(state: AppState) -> None:
     end = start + page_size
     page_records = filtered[start:end]
 
-    table_rows = [
-        {
+    # Get knowledge columns to display
+    knowledge_columns = []
+    try:
+        with session_scope() as session:
+            from app.db.models import KnowledgeTableMetadata
+            tn_metadata = (
+                session.query(KnowledgeTableMetadata)
+                .filter(KnowledgeTableMetadata.table_name == "Knowledge_TNs")
+                .first()
+            )
+            domain_metadata = (
+                session.query(KnowledgeTableMetadata)
+                .filter(KnowledgeTableMetadata.table_name == "Knowledge_Domains")
+                .first()
+            )
+            
+            if tn_metadata and tn_metadata.selected_columns:
+                knowledge_columns.extend(tn_metadata.selected_columns)
+            if domain_metadata and domain_metadata.selected_columns:
+                knowledge_columns.extend(domain_metadata.selected_columns)
+        
+        # Remove duplicates while preserving order
+        knowledge_columns = list(dict.fromkeys(knowledge_columns))
+    except Exception as exc:
+        logger.warning("Failed to load knowledge columns for display: %s", exc)
+        knowledge_columns = []  # Fallback to empty list
+    
+    table_rows = []
+    for record in page_records:
+        row = {
             # Existing columns
             "ID": record["id"],
             "Status": record.get("parse_status") or "unknown",
@@ -684,8 +712,27 @@ def _render_batch_panel(state: AppState) -> None:
             "Callback Numbers": ", ".join(record.get("callback_numbers_parsed", [])),
             "Body Text": _html_to_text_for_display(record.get("body_html")),
         }
-        for record in page_records
-    ]
+        
+        # Add knowledge columns
+        knowledge_data = record.get("knowledge_data") or {}
+        if not isinstance(knowledge_data, dict):
+            # Handle corrupted knowledge_data
+            logger.warning("Invalid knowledge_data type for email %d: %s", record["id"], type(knowledge_data))
+            knowledge_data = {}
+        
+        for col in knowledge_columns:
+            try:
+                value = knowledge_data.get(col, "")
+                # Ensure value is serializable for display
+                if value is None:
+                    row[col] = ""
+                else:
+                    row[col] = str(value)
+            except Exception as exc:
+                logger.warning("Error accessing knowledge column %s for email %d: %s", col, record["id"], exc)
+                row[col] = ""
+        
+        table_rows.append(row)
 
     st.subheader("Batch Summary")
     st.caption(f"Showing {len(page_records)} of {total_records} results (page {current_page}/{total_pages}).")
@@ -759,7 +806,7 @@ def _render_batch_panel(state: AppState) -> None:
     # Note: st.session_state["report_selection"] is automatically updated by the widget
     # No need to manually update it here
 
-    finalize_col, report_col, promote_col = st.columns([1, 1, 2])
+    finalize_col, report_col, knowledge_col, promote_col = st.columns([1, 1, 1, 2])
 
     with finalize_col:
         if st.button("Finalize Batch", width="stretch"):
@@ -776,6 +823,10 @@ def _render_batch_panel(state: AppState) -> None:
         generate_report = st.button("Generate HTML Report", disabled=not report_selection, width="stretch")
         generate_takedown = st.button("Generate Takedown Bundle", disabled=not report_selection, width="stretch",
                                      help="Create CSV and images folder for takedown requests")
+    
+    with knowledge_col:
+        add_knowledge = st.button("Add Knowledge", disabled=not report_selection, width="stretch",
+                                 help="Match phone numbers and URLs against knowledge tables and add selected columns to batch")
     if generate_takedown:
         with session_scope() as session:
             from app.services.takedown_bundle import generate_takedown_bundle
@@ -804,6 +855,56 @@ def _render_batch_panel(state: AppState) -> None:
             )
         else:
             st.error("Takedown bundle generation failed. Check logs for details.")
+    if add_knowledge:
+        with session_scope() as session:
+            from app.services.knowledge import add_knowledge_to_emails
+            try:
+                result = add_knowledge_to_emails(session, email_ids=report_selection)
+                session.commit()
+                
+                # Build notification message
+                notification_parts = []
+                if result.matched_tns > 0:
+                    notification_parts.append(f"{result.matched_tns} phone matches")
+                if result.matched_domains > 0:
+                    notification_parts.append(f"{result.matched_domains} domain matches")
+                if result.updated > 0:
+                    notification_parts.append(f"{result.updated} emails updated")
+                if result.errors > 0:
+                    notification_parts.append(f"{result.errors} errors")
+                
+                if notification_parts:
+                    state.add_notification(f"Added knowledge: {', '.join(notification_parts)}")
+                
+                # Show detailed results
+                if result.updated > 0:
+                    success_msg = f"Knowledge enrichment completed:\n"
+                    if result.matched_tns > 0:
+                        success_msg += f"- Phone number matches: {result.matched_tns}\n"
+                    if result.matched_domains > 0:
+                        success_msg += f"- Domain matches: {result.matched_domains}\n"
+                    success_msg += f"- Emails updated: {result.updated}"
+                    st.success(success_msg)
+                else:
+                    st.warning("⚠️ No emails were updated. Check that knowledge tables are initialized and columns are selected.")
+                
+                if result.errors > 0:
+                    st.warning(f"⚠️ {result.errors} emails had errors during processing.")
+                    if result.error_details:
+                        with st.expander(f"View {len(result.error_details)} error details", expanded=False):
+                            for error in result.error_details[:20]:  # Show first 20 errors
+                                st.text(error)
+                            if len(result.error_details) > 20:
+                                st.caption(f"... and {len(result.error_details) - 20} more errors")
+                
+                if result.updated > 0:
+                    st.rerun()
+            except ValueError as exc:
+                st.error(f"Cannot add knowledge: {exc}")
+            except Exception as exc:
+                st.error(f"Failed to add knowledge: {exc}")
+                logger.exception("Failed to add knowledge to emails")
+    
     if generate_report:
         with session_scope() as session:
             artifacts = generate_email_report(

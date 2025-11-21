@@ -18,7 +18,7 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.config import AppConfig, load_config
-from app.db.models import InputEmail
+from app.db.models import InputEmail, KnowledgeTableMetadata
 from app.utils import sha256_file
 
 from email import policy
@@ -143,27 +143,44 @@ def _build_detail_card(label: str, value: str) -> str:
     ).strip()
 
 
-def _render_email_section(email: InputEmail, body_markup: str, attachments_markup: str) -> str:
+def _render_email_section(email: InputEmail, body_markup: str, attachments_markup: str, knowledge_columns: List[str] = None) -> str:
     urls = ", ".join(_decode_json_list(email.url_parsed)) or "N/A"
     callbacks = ", ".join(_decode_json_list(email.callback_number_parsed)) or "N/A"
+    
+    # Body markup is already processed with CSS in _resolve_body_markup
     body_src = base64.b64encode(body_markup.encode("utf-8")).decode("utf-8")
-    detail_cards = "".join(
-        [
-            _build_detail_card("Subject ID", email.subject_id or "N/A"),
-            _build_detail_card("Message ID", email.message_id or "N/A"),
-            _build_detail_card("Sender", email.sender or "N/A"),
-            _build_detail_card("Date Sent", _format_datetime(email.date_sent)),
-            _build_detail_card("Date Reported", _format_datetime(email.date_reported)),
-            _build_detail_card("URLs", urls),
-            _build_detail_card("Callback Numbers", callbacks),
-            _build_detail_card("Additional Contacts", email.additional_contacts or "N/A"),
-            _build_detail_card(
-                "Model Confidence",
-                f"{email.model_confidence:.2f}" if email.model_confidence is not None else "N/A",
-            ),
-            _build_detail_card("Email Hash", email.email_hash or "N/A"),
-        ]
-    )
+    
+    detail_cards = [
+        _build_detail_card("Subject ID", email.subject_id or "N/A"),
+        _build_detail_card("Message ID", email.message_id or "N/A"),
+        _build_detail_card("Sender", email.sender or "N/A"),
+        _build_detail_card("Date Sent", _format_datetime(email.date_sent)),
+        _build_detail_card("Date Reported", _format_datetime(email.date_reported)),
+        _build_detail_card("URLs", urls),
+        _build_detail_card("Callback Numbers", callbacks),
+        _build_detail_card("Additional Contacts", email.additional_contacts or "N/A"),
+        _build_detail_card(
+            "Model Confidence",
+            f"{email.model_confidence:.2f}" if email.model_confidence is not None else "N/A",
+        ),
+        _build_detail_card("Email Hash", email.email_hash or "N/A"),
+    ]
+    
+    # Add knowledge columns if available
+    if knowledge_columns:
+        knowledge_data = email.knowledge_data or {}
+        if not isinstance(knowledge_data, dict):
+            knowledge_data = {}
+        
+        for col in knowledge_columns:
+            value = knowledge_data.get(col, "")
+            if value is None:
+                value = ""
+            else:
+                value = str(value)
+            detail_cards.append(_build_detail_card(col, value or "N/A"))
+    
+    detail_cards_html = "".join(detail_cards)
 
     section = textwrap.dedent(
         f"""
@@ -188,10 +205,10 @@ def _render_email_section(email: InputEmail, body_markup: str, attachments_marku
             <div class="email-card__content">
                 <div class="email-card__body">
                     <h3>Message Body</h3>
-                    <iframe class="body-preview" sandbox="allow-same-origin" src="data:text/html;base64,{body_src}"></iframe>
+                    <iframe class="body-preview" sandbox="allow-same-origin allow-scripts" src="data:text/html;base64,{body_src}"></iframe>
                 </div>
                 <div class="email-card__details">
-                    {detail_cards}
+                    {detail_cards_html}
                 </div>
             </div>
             {attachments_markup}
@@ -1109,13 +1126,69 @@ def _extract_html_from_original(original_bytes: bytes) -> Optional[str]:
     return None
 
 
+def _add_image_css_to_html(html_content: str) -> str:
+    """Add CSS to HTML content to ensure images display correctly and are properly sized."""
+    if not html_content:
+        return html_content
+    
+    # CSS to constrain image sizes
+    image_css = """
+    <style>
+        img {
+            max-width: 100% !important;
+            max-height: 400px !important;
+            width: auto !important;
+            height: auto !important;
+            object-fit: contain !important;
+            display: block !important;
+            margin: 10px auto !important;
+        }
+        body {
+            padding: 15px;
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+        }
+    </style>
+    """
+    
+    # Try to inject CSS into the HTML
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_content, "html.parser")
+        
+        # Add CSS to head if it exists, otherwise create head
+        if soup.head:
+            soup.head.insert(0, BeautifulSoup(image_css, "html.parser"))
+        elif soup.html:
+            head_tag = soup.new_tag("head")
+            head_tag.insert(0, BeautifulSoup(image_css, "html.parser"))
+            soup.html.insert(0, head_tag)
+        else:
+            # No HTML structure, wrap in basic structure
+            html_tag = soup.new_tag("html")
+            head_tag = soup.new_tag("head")
+            head_tag.insert(0, BeautifulSoup(image_css, "html.parser"))
+            body_tag = soup.new_tag("body")
+            # Move all existing content to body
+            for element in soup.contents:
+                body_tag.append(element)
+            html_tag.append(head_tag)
+            html_tag.append(body_tag)
+            soup = BeautifulSoup(str(html_tag), "html.parser")
+        
+        return str(soup)
+    except Exception:
+        # If processing fails, prepend CSS to content
+        return image_css + html_content
+
+
 def _resolve_body_markup(email: InputEmail, original_bytes: Optional[bytes]) -> str:
     if original_bytes:
         extracted = _extract_html_from_original(original_bytes)
         if extracted:
-            return extracted
+            return _add_image_css_to_html(extracted)
     if email.body_html:
-        return email.body_html
+        return _add_image_css_to_html(email.body_html)
     fallback = email.body_html or "No message body available."
     return f"<pre>{escape(fallback)}</pre>"
 
@@ -1143,6 +1216,31 @@ def generate_email_report(
         logger.info("No matching emails found for report generation.")
         return None
 
+    # Get knowledge columns from metadata
+    knowledge_columns = []
+    try:
+        tn_metadata = (
+            session.query(KnowledgeTableMetadata)
+            .filter(KnowledgeTableMetadata.table_name == "Knowledge_TNs")
+            .first()
+        )
+        domain_metadata = (
+            session.query(KnowledgeTableMetadata)
+            .filter(KnowledgeTableMetadata.table_name == "Knowledge_Domains")
+            .first()
+        )
+        
+        if tn_metadata and tn_metadata.selected_columns:
+            knowledge_columns.extend(tn_metadata.selected_columns)
+        if domain_metadata and domain_metadata.selected_columns:
+            knowledge_columns.extend(domain_metadata.selected_columns)
+        
+        # Remove duplicates while preserving order
+        knowledge_columns = list(dict.fromkeys(knowledge_columns))
+    except Exception as exc:
+        logger.warning("Failed to fetch knowledge columns for report: %s", exc)
+        knowledge_columns = []
+    
     original_map = _collect_original_email_bytes(cfg, emails)
     all_attachment_files: List[Tuple[str, bytes]] = []
     all_email_files: List[Tuple[str, bytes]] = []
@@ -1199,7 +1297,7 @@ def generate_email_report(
 
         attachments_markup = _render_attachments(markup_attachments)
         body_markup = _resolve_body_markup(email, original_bytes)
-        sections.append(_render_email_section(email, body_markup, attachments_markup))
+        sections.append(_render_email_section(email, body_markup, attachments_markup, knowledge_columns))
 
         payload_emails.append(
             {
