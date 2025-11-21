@@ -26,7 +26,15 @@ def _render_table_initialization(state: AppState, table_name: str, display_name:
     """Render UI for initializing a knowledge table."""
     st.subheader(f"Initialize {display_name}")
     
+    # Check for initialization success from previous run first
+    success_key = f"_knowledge_init_success_{table_name}"
+    if st.session_state.get(success_key):
+        st.success(f"✅ {display_name} initialized successfully!")
+        del st.session_state[success_key]  # Clear after showing
+    
+    # Check if table is already initialized (use fresh session to avoid cache issues)
     with session_scope() as session:
+        # Use a fresh query to ensure we see committed data
         metadata = (
             session.query(KnowledgeTableMetadata)
             .filter(KnowledgeTableMetadata.table_name == table_name)
@@ -90,23 +98,51 @@ def _render_table_initialization(state: AppState, table_name: str, display_name:
                 help="This column will be used to match against phone numbers or URLs in emails.",
             )
             
-            if st.button(f"Initialize {display_name}", key=f"btn_init_{table_name}"):
-                with session_scope() as session:
-                    try:
-                        metadata = initialize_knowledge_table(
-                            session,
-                            table_name=table_name,
-                            primary_key_column=primary_key_col,
-                            schema=schema,
+            # Initialize button with proper error handling
+            if st.button(f"Initialize {display_name}", key=f"btn_init_{table_name}", type="primary"):
+                try:
+                    # Initialize in one session
+                    with session_scope() as session:
+                        try:
+                            metadata = initialize_knowledge_table(
+                                session,
+                                table_name=table_name,
+                                primary_key_column=primary_key_col,
+                                schema=schema,
+                            )
+                            # Session will commit automatically on exit from context manager
+                            logger.info("Successfully initialized knowledge table %s with schema: %s", 
+                                       table_name, schema)
+                        except ValueError as exc:
+                            st.error(f"Validation error: {exc}")
+                            logger.warning("Validation error initializing %s: %s", table_name, exc)
+                            return  # Stop here if validation fails
+                        except Exception as exc:
+                            error_msg = str(exc)
+                            st.error(f"Failed to initialize table: {error_msg}")
+                            logger.exception("Failed to initialize knowledge table %s: %s", table_name, exc)
+                            return  # Stop here if initialization fails
+                    
+                    # Verify the initialization was committed by querying in a fresh session
+                    with session_scope() as verify_session:
+                        verify_metadata = (
+                            verify_session.query(KnowledgeTableMetadata)
+                            .filter(KnowledgeTableMetadata.table_name == table_name)
+                            .first()
                         )
-                        # Don't commit here - session_scope() will handle the commit
-                        st.success(f"✅ {display_name} initialized successfully!")
-                        st.rerun()
-                    except ValueError as exc:
-                        st.error(f"Validation error: {exc}")
-                    except Exception as exc:
-                        st.error(f"Failed to initialize table: {exc}")
-                        logger.exception("Failed to initialize knowledge table")
+                        if verify_metadata:
+                            logger.info("Verified knowledge table %s metadata exists in database (ID: %s)", 
+                                       table_name, verify_metadata.id)
+                            # Store success in session state to show after rerun
+                            st.session_state[success_key] = True
+                            st.rerun()  # Rerun to refresh the UI
+                        else:
+                            logger.error("Knowledge table %s metadata not found after initialization!", table_name)
+                            st.error("⚠️ Initialization may have failed. Please check the logs and try again.")
+                except Exception as exc:
+                    error_msg = str(exc)
+                    st.error(f"Unexpected error during initialization: {error_msg}")
+                    logger.exception("Unexpected error during knowledge table initialization for %s", table_name)
         except pd.errors.EmptyDataError:
             st.error("CSV file is empty or malformed.")
         except pd.errors.ParserError as exc:
@@ -160,43 +196,79 @@ def _render_data_upload(state: AppState, table_name: str, display_name: str) -> 
             st.info(f"CSV loaded: {len(df)} rows")
             st.dataframe(df.head(5), use_container_width=True)
             
-            if st.button(f"Upload to {display_name}", key=f"btn_upload_{table_name}"):
+            # Check for upload success from previous run
+            upload_success_key = f"_knowledge_upload_success_{table_name}"
+            if st.session_state.get(upload_success_key):
+                success_info = st.session_state[upload_success_key]
+                st.success(f"✅ Uploaded {success_info.get('records_added', 0)} records to {display_name}!")
+                if success_info.get('records_skipped', 0) > 0:
+                    st.warning(f"⚠️ Skipped {success_info['records_skipped']} records due to errors.")
+                del st.session_state[upload_success_key]  # Clear after showing
+            
+            if st.button(f"Upload to {display_name}", key=f"btn_upload_{table_name}", type="primary"):
                 try:
+                    # Upload in one session
                     with session_scope() as session:
                         try:
                             result = upload_knowledge_data(session, table_name, df)
-                            # Don't commit here - session_scope() will handle the commit
-                            
-                            # Show detailed results
-                            if result.records_added > 0:
-                                st.success(
-                                    f"✅ Uploaded {result.records_added} records to {display_name}!"
-                                )
-                            else:
-                                st.warning("⚠️ No records were uploaded.")
-                            
-                            if result.records_skipped > 0:
-                                st.warning(
-                                    f"⚠️ Skipped {result.records_skipped} records due to errors."
-                                )
-                            
-                            if result.errors:
-                                with st.expander(f"View {len(result.errors)} errors", expanded=False):
-                                    for error in result.errors[:20]:  # Show first 20 errors
-                                        st.text(error)
-                                    if len(result.errors) > 20:
-                                        st.caption(f"... and {len(result.errors) - 20} more errors")
-                            
-                            if result.records_added > 0:
-                                st.rerun()
+                            # Session will commit automatically on exit from context manager
+                            logger.info("Successfully uploaded %d records to %s (skipped: %d)", 
+                                       result.records_added, table_name, result.records_skipped)
                         except ValueError as exc:
                             st.error(f"Validation error: {exc}")
+                            logger.warning("Validation error uploading to %s: %s", table_name, exc)
+                            return  # Stop here if validation fails
                         except Exception as exc:
-                            st.error(f"Failed to upload data: {exc}")
-                            logger.exception("Failed to upload knowledge data")
+                            error_msg = str(exc)
+                            st.error(f"Failed to upload data: {error_msg}")
+                            logger.exception("Failed to upload knowledge data to %s: %s", table_name, exc)
+                            return  # Stop here if upload fails
+                    
+                    # Verify the upload was committed by querying record count in a fresh session
+                    with session_scope() as verify_session:
+                        if table_name == "Knowledge_TNs":
+                            verify_count = verify_session.query(KnowledgeTN).count()
+                        else:
+                            verify_count = verify_session.query(KnowledgeDomain).count()
+                        logger.info("Verified knowledge table %s has %d records after upload", 
+                                   table_name, verify_count)
+                    
+                    # Show detailed results
+                    if result.records_added > 0:
+                        # Store success in session state to show after rerun
+                        st.session_state[upload_success_key] = {
+                            'records_added': result.records_added,
+                            'records_skipped': result.records_skipped
+                        }
+                        if result.records_skipped > 0:
+                            st.warning(
+                                f"⚠️ Skipped {result.records_skipped} records due to errors."
+                            )
+                        
+                        if result.errors:
+                            with st.expander(f"View {len(result.errors)} errors", expanded=False):
+                                for error in result.errors[:20]:  # Show first 20 errors
+                                    st.text(error)
+                                if len(result.errors) > 20:
+                                    st.caption(f"... and {len(result.errors) - 20} more errors")
+                        
+                        st.rerun()  # Rerun to refresh the UI
+                    else:
+                        st.warning("⚠️ No records were uploaded.")
+                        if result.records_skipped > 0:
+                            st.warning(
+                                f"⚠️ Skipped {result.records_skipped} records due to errors."
+                            )
+                        if result.errors:
+                            with st.expander(f"View {len(result.errors)} errors", expanded=False):
+                                for error in result.errors[:20]:
+                                    st.text(error)
+                                if len(result.errors) > 20:
+                                    st.caption(f"... and {len(result.errors) - 20} more errors")
                 except Exception as exc:
-                    st.error(f"Failed to upload data: {exc}")
-                    logger.exception("Failed to upload knowledge data")
+                    error_msg = str(exc)
+                    st.error(f"Unexpected error during upload: {error_msg}")
+                    logger.exception("Unexpected error during knowledge data upload for %s", table_name)
         except pd.errors.EmptyDataError:
             st.error("CSV file is empty or malformed.")
         except pd.errors.ParserError as exc:
@@ -231,8 +303,14 @@ def _render_column_selection(state: AppState, table_name: str, display_name: str
         st.info("No additional columns available (only primary key column).")
         return
     
-    # Get current selection
-    current_selection = metadata.selected_columns or []
+    # Get current selection (ensure it's a list, handle None or wrong type)
+    current_selection = metadata.selected_columns
+    if current_selection is None:
+        current_selection = []
+    elif not isinstance(current_selection, list):
+        # Handle legacy data that might be stored as dict or other type
+        logger.warning("selected_columns is not a list, resetting to empty list")
+        current_selection = []
     
     # Filter current_selection to only include columns that are in available_columns
     # This prevents errors when the table schema changes
@@ -246,37 +324,76 @@ def _render_column_selection(state: AppState, table_name: str, display_name: str
         help="These columns will be added to the Batch Summary when 'Add Knowledge' is run.",
     )
     
-    if st.button(f"Save Column Selection for {display_name}", key=f"btn_save_{table_name}"):
-        with session_scope() as session:
-            try:
-                metadata = (
-                    session.query(KnowledgeTableMetadata)
+    # Check for column selection success from previous run
+    selection_success_key = f"_knowledge_selection_success_{table_name}"
+    if st.session_state.get(selection_success_key):
+        st.success(f"✅ Column selection saved for {display_name}!")
+        del st.session_state[selection_success_key]  # Clear after showing
+    
+    if st.button(f"Save Column Selection for {display_name}", key=f"btn_save_{table_name}", type="primary"):
+        try:
+            # Save in one session
+            with session_scope() as session:
+                try:
+                    metadata = (
+                        session.query(KnowledgeTableMetadata)
+                        .filter(KnowledgeTableMetadata.table_name == table_name)
+                        .first()
+                    )
+                    if not metadata:
+                        st.error(f"Table {display_name} metadata not found. Please initialize the table first.")
+                        return
+                    
+                    # Validate selected columns exist in schema (excluding primary key)
+                    schema_columns = set(metadata.schema_definition.keys())
+                    invalid_columns = set(selected) - schema_columns
+                    if invalid_columns:
+                        st.error(f"Invalid columns selected: {', '.join(invalid_columns)}")
+                        return
+                    
+                    metadata.selected_columns = selected
+                    # Session will commit automatically on exit from context manager
+                    logger.info("Saved column selection for %s: %d columns", table_name, len(selected))
+                except ValueError as exc:
+                    st.error(f"Validation error: {exc}")
+                    logger.warning("Validation error saving column selection for %s: %s", table_name, exc)
+                    return  # Stop here if validation fails
+                except Exception as exc:
+                    error_msg = str(exc)
+                    st.error(f"Failed to save column selection: {error_msg}")
+                    logger.exception("Failed to save column selection for %s: %s", table_name, exc)
+                    return  # Stop here if save fails
+            
+            # Verify the selection was committed by querying in a fresh session
+            with session_scope() as verify_session:
+                verify_metadata = (
+                    verify_session.query(KnowledgeTableMetadata)
                     .filter(KnowledgeTableMetadata.table_name == table_name)
                     .first()
                 )
-                if not metadata:
-                    st.error(f"Table {display_name} metadata not found. Please initialize the table first.")
-                    return
-                
-                # Validate selected columns exist in schema (excluding primary key)
-                schema_columns = set(metadata.schema_definition.keys())
-                invalid_columns = set(selected) - schema_columns
-                if invalid_columns:
-                    st.error(f"Invalid columns selected: {', '.join(invalid_columns)}")
-                    return
-                
-                metadata.selected_columns = selected
-                # Don't commit here - session_scope() will handle the commit
-                st.success(f"✅ Column selection saved for {display_name}!")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Failed to save column selection: {exc}")
-                logger.exception("Failed to save column selection")
+                if verify_metadata:
+                    verify_selected = verify_metadata.selected_columns
+                    if verify_selected is None or not isinstance(verify_selected, list):
+                        verify_selected = []
+                    logger.info("Verified column selection for %s: %d columns saved", 
+                               table_name, len(verify_selected))
+                    # Store success in session state to show after rerun
+                    st.session_state[selection_success_key] = True
+                    st.rerun()  # Rerun to refresh the UI
+                else:
+                    logger.error("Knowledge table %s metadata not found after saving selection!", table_name)
+                    st.error("⚠️ Column selection may not have been saved. Please try again.")
+        except Exception as exc:
+            error_msg = str(exc)
+            st.error(f"Unexpected error during column selection save: {error_msg}")
+            logger.exception("Unexpected error during column selection save for %s", table_name)
 
 
 def _render_table_status(state: AppState, table_name: str, display_name: str) -> None:
     """Render status and record count for a knowledge table."""
+    # Use a fresh session to ensure we see the latest data
     with session_scope() as session:
+        # Query with explicit filter to avoid any cache issues
         metadata = (
             session.query(KnowledgeTableMetadata)
             .filter(KnowledgeTableMetadata.table_name == table_name)
@@ -287,6 +404,18 @@ def _render_table_status(state: AppState, table_name: str, display_name: str) ->
             record_count = session.query(KnowledgeTN).count()
         else:
             record_count = session.query(KnowledgeDomain).count()
+        
+        # Get selected columns count, handling None and non-list types
+        selected_count = 0
+        if metadata:
+            selected_cols = metadata.selected_columns
+            if selected_cols is not None:
+                if isinstance(selected_cols, list):
+                    selected_count = len(selected_cols)
+                else:
+                    logger.warning("selected_columns for %s is not a list (type: %s), value: %s", 
+                                  table_name, type(selected_cols), selected_cols)
+                    selected_count = 0
     
     if metadata:
         col1, col2, col3 = st.columns(3)
@@ -295,10 +424,12 @@ def _render_table_status(state: AppState, table_name: str, display_name: str) ->
         with col2:
             st.metric("Records", record_count)
         with col3:
-            selected_count = len(metadata.selected_columns or [])
             st.metric("Selected Columns", selected_count)
+            if selected_count == 0:
+                st.caption("No columns selected")
     else:
         st.metric("Status", "⚠️ Not Initialized")
+        logger.debug("Knowledge table %s status check: metadata not found", table_name)
 
 
 def render(state: AppState) -> None:

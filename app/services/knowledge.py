@@ -204,7 +204,9 @@ def initialize_knowledge_table(
             selected_columns=None,
         )
         session.add(metadata)
-        session.flush()
+        session.flush()  # Flush to get the ID and validate
+        logger.info("Created knowledge table metadata for %s with primary key column %s", 
+                   table_name, primary_key_column)
         return metadata
     except Exception as exc:
         logger.error("Failed to initialize knowledge table %s: %s", table_name, exc)
@@ -283,6 +285,9 @@ def upload_knowledge_data(
     records_skipped = 0
     errors = []
     
+    logger.info("Starting upload to %s: %d rows, primary key column: %s", 
+                table_name, len(df), primary_key_col)
+    
     # Insert or update records with error handling per row
     for idx, row in df.iterrows():
         try:
@@ -331,8 +336,8 @@ def upload_knowledge_data(
             
             # Validate data_dict can be serialized to JSON
             try:
-                import json
-                json.dumps(data_dict)  # Test serialization
+                from app.utils.json_helpers import safe_json_dumps
+                safe_json_dumps(data_dict)  # Test serialization
             except (TypeError, ValueError) as exc:
                 records_skipped += 1
                 errors.append(f"Row {idx + 1}: Invalid data types (cannot serialize to JSON): {exc}")
@@ -361,6 +366,8 @@ def upload_knowledge_data(
                     session.add(new_record)
                 
                 records_added += 1
+                if records_added % 10 == 0:
+                    logger.debug("Processed %d records so far", records_added)
             except Exception as db_exc:
                 # Handle unique constraint violations (race condition)
                 from sqlalchemy.exc import IntegrityError
@@ -405,8 +412,10 @@ def upload_knowledge_data(
     
     try:
         session.flush()
+        logger.info("Upload to %s completed: %d added, %d skipped, %d errors", 
+                   table_name, records_added, records_skipped, len(errors))
     except Exception as exc:
-        logger.error("Failed to flush database changes: %s", exc)
+        logger.error("Failed to flush database changes for %s: %s", table_name, exc)
         session.rollback()
         raise
     
@@ -468,9 +477,14 @@ def add_knowledge_to_emails(
     if not tn_metadata and not domain_metadata:
         raise ValueError("No knowledge tables initialized. Please initialize at least one table.")
     
-    # Get selected columns for each table
-    tn_selected = tn_metadata.selected_columns if tn_metadata and tn_metadata.selected_columns else []
-    domain_selected = domain_metadata.selected_columns if domain_metadata and domain_metadata.selected_columns else []
+    # Get selected columns for each table (ensure they are lists)
+    tn_selected = []
+    if tn_metadata and tn_metadata.selected_columns:
+        tn_selected = tn_metadata.selected_columns if isinstance(tn_metadata.selected_columns, list) else []
+    
+    domain_selected = []
+    if domain_metadata and domain_metadata.selected_columns:
+        domain_selected = domain_metadata.selected_columns if isinstance(domain_metadata.selected_columns, list) else []
     
     if not tn_selected and not domain_selected:
         raise ValueError("No columns selected for knowledge enrichment. Please select columns in Knowledge page.")
@@ -570,7 +584,8 @@ def add_knowledge_to_emails(
             
             # Validate the dict can be serialized to JSON
             try:
-                json.dumps(existing)
+                from app.utils.json_helpers import safe_json_dumps
+                safe_json_dumps(existing)
             except (TypeError, ValueError) as exc:
                 logger.error("Cannot serialize knowledge_data for email %d: %s", email.id, exc)
                 stats.errors += 1

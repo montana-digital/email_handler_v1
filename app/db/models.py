@@ -150,7 +150,7 @@ class KnowledgeTableMetadata(Base):
     table_name: Mapped[str] = mapped_column(String(100), unique=True)  # "Knowledge_TNs" or "Knowledge_Domains"
     primary_key_column: Mapped[str] = mapped_column(String(100))  # Column name used as primary key
     schema_definition: Mapped[dict] = mapped_column(JSON)  # Column names, types, etc.
-    selected_columns: Mapped[Optional[dict]] = mapped_column(JSON, default=None)  # Columns selected for "Add Knowledge"
+    selected_columns: Mapped[Optional[list]] = mapped_column(JSON, default=None)  # Columns selected for "Add Knowledge" (list of column names)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

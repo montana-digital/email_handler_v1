@@ -51,7 +51,7 @@ def get_version_from_git() -> str:
         pass
     
     # Fallback to hardcoded version if git is not available
-    return "v0.6.0"
+    return "v0.6.4"
 
 
 def get_app_version(clean: bool = True) -> str:
