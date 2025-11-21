@@ -54,11 +54,21 @@ def get_version_from_git() -> str:
     return "v0.6.0"
 
 
-def get_app_version() -> str:
+def get_app_version(clean: bool = True) -> str:
     """Get the application version.
     
     This is the main function to use throughout the app.
     It returns the version from git tags, or a fallback version.
+    
+    Args:
+        clean: If True, removes "-dirty" suffix for cleaner display. Default True.
+    
+    Returns:
+        Version string (e.g., "v0.6.0")
     """
-    return get_version_from_git()
+    version = get_version_from_git()
+    if clean and version.endswith("-dirty"):
+        # Remove "-dirty" suffix for cleaner UI display
+        version = version[:-6]
+    return version
 
