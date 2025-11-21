@@ -48,20 +48,36 @@
   - `parser_phones.py` (Parser4): extracts and normalizes phone numbers via `phonenumbers` library.
 - `app/services/`
   - `ingestion.py`: batch orchestrator handling file discovery, hashing, parser execution, and conversion to ORM entities.
+  - `parsing.py`: parser pipeline orchestration with strategy pattern for resilient email parsing (EML/MSG detection, fallback parsers).
   - `attachments.py`: manages attachment extraction, categorization, and ZIP packaging.
   - `reporting.py`: builds HTML summaries for selected emails.
   - `standard_emails.py`: promotes curated `InputEmail` records into the `StandardEmail` table with supplemental parsing.
   - `standard_email_records.py`: provides read-optimized helpers for Standard Email listings and detail views.
   - `email_exports.py`: assembles HTML exports plus attachment bundles for analyst download workflows.
+  - `email_records.py`: helpers for loading and updating email records, including pickle file synchronization.
   - `database_admin.py`: introspects SQLite schema, performs row edits/deletes/inserts, truncates tables, and runs ad-hoc SQL in a controlled fashion.
   - `powershell.py`: launches PowerShell scripts, captures execution output, and loads manifest metadata for script UX.
   - `batch_finalization.py`: archives reviewed pickle batches, updates status, and records finalization timestamps.
+  - `reparse.py`: re-runs the parsing pipeline on stored emails using original email content from the database.
+  - `knowledge.py`: manages knowledge table initialization, data upload, and email enrichment with phone number and domain knowledge.
+  - `takedown_bundle.py`: generates takedown bundles with CSV exports and image attachments for legal/compliance workflows.
+  - `app_reset.py`: provides application reset functionality including database backup and restoration.
+  - `shared.py`: shared utilities for email parsing and data transformation used across multiple services.
 - `app/ui/`
   - `bootstrap.py`: loads configuration, initializes the database, renders the shared sidebar, and returns session state for every page.
   - `sidebar.py`: shared sidebar layout (environment summary, docs links, notifications, quick-open directory buttons).
-  - `pages/`: renderers for `home`, `deploy_scripts`, `settings`, `email_display`, `attachments`, and the `database_display` Standard Email archive.
+  - `pages/`: renderers for `home`, `deploy_scripts`, `settings`, `email_display`, `attachments`, `knowledge`, and the `database_display` Standard Email archive.
   - `state.py`: shared state container bridging Streamlit session with database services.
   - `main_nav.py`: legacy navigation helper retained for backward compatibility.
+  - `utils/images.py`: image processing utilities for email body HTML image handling and format detection.
+  - `styles/animations.py`: animation utilities for UI enhancements.
+- `app/utils/`
+  - `error_handling.py`: centralized error message formatting for database and connection errors, providing user-friendly messages.
+  - `validation.py`: input validation helpers for email IDs, batch IDs, email hashes, table names, and SQL statements.
+  - `path_validation.py`: path sanitization, validation, and normalization utilities with Windows-specific handling.
+  - `hash.py`: hashing utilities including SHA256 digest functions for email content.
+  - `version.py`: version management utilities for application versioning.
+  - `file_operations.py`: standardized file operation utilities with consistent error handling, atomic writes, and retry logic.
 
 ## 5. Data Flow Summary
 1. User downloads emails using Deploy Scripts page (PowerShell script launched directly from Streamlit with stdout/stderr capture).
@@ -70,6 +86,8 @@
 4. Streamlit UI loads available batches/records, enabling filtering, selection, edits, and bulk operations.
 5. Edits trigger service layer updates (SQLite + Pickle). Finalization archives the pickle and marks the batch as finalized.
 6. Attachment operations and reporting are initiated from UI, leveraging services to extract assets or generate HTML reports in `data/output/`.
+7. Knowledge enrichment: users can upload CSV data to knowledge tables (TNs/Domains), which is then matched against emails to enrich records with additional metadata.
+8. Email re-parsing: stored emails can be re-parsed using the original email content, useful when parser improvements are made or parsing initially failed.
 
 ## 6. PowerShell Integration Touchpoints
 - Deploy Scripts page resolves `powershell.exe`/`pwsh` and runs scripts in-process, capturing stdout/stderr and exit codes for analyst review.

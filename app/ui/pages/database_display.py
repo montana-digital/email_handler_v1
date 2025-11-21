@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import base64
 import math
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
+from loguru import logger
 from PIL import Image, UnidentifiedImageError
 from streamlit.components.v1 import html
+from sqlalchemy.exc import OperationalError
 
 from app.db.init_db import session_scope
+from app.utils.error_handling import format_database_error
 from app.db.models import StandardEmail
 from app.services.email_exports import (
     build_attachments_zip,
@@ -21,6 +26,7 @@ from app.services.email_exports import (
 from app.services.reporting import generate_email_report
 from app.services.standard_email_records import get_standard_email_detail, list_standard_email_records
 from app.services.takedown_bundle import generate_takedown_bundle
+from app.ui.components.date_filter import apply_date_filter, render_date_filter
 from app.ui.state import AppState
 from app.ui.utils.images import display_image_with_dialog, process_html_images
 
@@ -142,8 +148,18 @@ def _render_download_buttons(detail: dict, attachments: list[dict], config) -> N
 
 @st.fragment
 def _render_saved_email_table(state: AppState) -> tuple[list[dict], list[int]]:
-    with session_scope() as session:
-        records = list_standard_email_records(session, limit=2000)
+    try:
+        with session_scope() as session:
+            records = list_standard_email_records(session, limit=2000)
+    except OperationalError as exc:
+        error_msg = format_database_error(exc, "load standard email records")
+        st.error(f"Database error loading emails: {error_msg}")
+        logger.exception("Database error loading standard email records: %s", exc)
+        return [], []
+    except Exception as exc:
+        st.error(f"Unexpected error loading emails: {str(exc)[:200]}")
+        logger.exception("Unexpected error loading standard email records: %s", exc)
+        return [], []
 
     if not records:
         st.info("No standard emails are available yet. Promote emails from the Email Display page first.")
@@ -219,6 +235,41 @@ def _render_saved_email_table(state: AppState) -> tuple[list[dict], list[int]]:
     # Initialize filter state in session
     if "database_active_filters" not in st.session_state:
         st.session_state["database_active_filters"] = []
+
+    # Date Range Filter
+    st.markdown("### Date/Time Filtering")
+    available_date_fields = [
+        ("date_sent", "Date Sent"),
+        ("created_at", "Created At"),
+    ]
+    
+    def get_date_value(record: dict, field: str) -> Optional[datetime]:
+        """Extract date value from record."""
+        date_str = record.get(field)
+        if not date_str:
+            return None
+        if isinstance(date_str, datetime):
+            return date_str
+        if isinstance(date_str, str):
+            try:
+                # Handle ISO format strings
+                date_str = date_str.replace("Z", "+00:00")
+                return datetime.fromisoformat(date_str)
+            except (ValueError, AttributeError):
+                return None
+        return None
+    
+    date_filter = render_date_filter(
+        available_date_fields=available_date_fields,
+        session_state_key="database_date_filter",
+        default_field="date_sent"
+    )
+    
+    # Apply date filter
+    if date_filter and date_filter.get("enabled"):
+        field_key = date_filter["field"]
+        date_accessor = lambda record: get_date_value(record, field_key)
+        filtered = apply_date_filter(filtered, date_filter, date_accessor)
 
     # Advanced Filters UI
     with st.expander("Advanced Filters & Sorting", expanded=False):
@@ -656,8 +707,12 @@ def render(state: AppState) -> None:
     if not filtered_records or not available_ids:
         return
 
+    # Ensure selected_standard_email_id is in available_ids
     if state.selected_standard_email_id not in available_ids:
-        state.selected_standard_email_id = available_ids[0]
+        state.selected_standard_email_id = available_ids[0] if available_ids else None
+    
+    if not available_ids:
+        return
 
     selected_id = st.selectbox(
         "Select email for detail view",
@@ -667,11 +722,25 @@ def render(state: AppState) -> None:
     )
     state.selected_standard_email_id = selected_id
 
-    with session_scope() as session:
-        detail = get_standard_email_detail(session, selected_id)
+    try:
+        with session_scope() as session:
+            detail = get_standard_email_detail(session, selected_id)
+    except OperationalError as exc:
+        error_msg = format_database_error(exc, "load saved email details")
+        st.error(f"Database error loading email details: {error_msg}")
+        logger.exception("Database error loading saved email details: %s", exc)
+        return
+    except ValueError as exc:
+        st.error(f"Invalid email ID: {str(exc)}")
+        logger.warning("Invalid email ID in database display: %s", exc)
+        return
+    except Exception as exc:
+        st.error(f"Unexpected error loading email details: {str(exc)[:200]}")
+        logger.exception("Unexpected error loading saved email details: %s", exc)
+        return
 
     if not detail:
-        st.error("Unable to load saved email details.")
+        st.error("Unable to load saved email details. Email may not exist.")
         return
 
     _render_saved_email_detail(state, detail)

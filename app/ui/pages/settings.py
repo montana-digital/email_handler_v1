@@ -498,8 +498,18 @@ def render(state: AppState) -> None:
             st.warning("Provide a SQL statement to execute.")
         else:
             try:
-                with session_scope() as session:
-                    result = execute_sql(session, sql_command)
+                try:
+                    with session_scope() as session:
+                        result = execute_sql(session, sql_command)
+                except (ValueError, OperationalError) as exc:
+                    error_msg = format_database_error(exc, "execute SQL statement")
+                    st.error(f"SQL execution failed: {error_msg}")
+                    logger.exception("Error executing SQL: %s", exc)
+                    return
+                except Exception as exc:
+                    st.error(f"Unexpected error executing SQL: {str(exc)[:200]}")
+                    logger.exception("Unexpected error executing SQL: %s", exc)
+                    return
                 st.success(f"Statement executed. {result['rowcount']} rows affected.")
                 if result["rows"]:
                     st.dataframe(pd.DataFrame(result["rows"]), width="stretch")

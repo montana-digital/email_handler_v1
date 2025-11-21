@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import importlib.util
 import math
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
+from loguru import logger
 from PIL import Image, UnidentifiedImageError
 from streamlit.components.v1 import html
 
@@ -29,8 +32,11 @@ from app.services.parsing import parser_capabilities
 from app.services.reparse import reparse_email
 from app.services.reporting import generate_email_report
 from app.services.standard_emails import promote_to_standard_emails
+from app.ui.components.date_filter import apply_date_filter, render_date_filter
 from app.ui.state import AppState
 from app.ui.utils.images import display_image_with_dialog, process_html_images
+from app.utils.error_handling import format_database_error
+from sqlalchemy.exc import OperationalError
 
 
 def _html_to_text_for_display(html_content: str | None) -> str:
@@ -362,13 +368,27 @@ def _render_ingestion_panel(state: AppState) -> None:
                         f"Processing email {current} of {total}: **{file_name}**"
                     )
                 
-                with session_scope() as session:
-                    result = ingest_emails(
-                        session,
-                        config=state.config,
-                        progress_callback=update_progress,
-                        use_date_sent_for_original=use_date_sent_for_original,
-                    )
+                try:
+                    with session_scope() as session:
+                        result = ingest_emails(
+                            session,
+                            config=state.config,
+                            progress_callback=update_progress,
+                            use_date_sent_for_original=use_date_sent_for_original,
+                        )
+                except OperationalError as exc:
+                    progress_bar.empty()
+                    status_container.empty()
+                    error_msg = format_database_error(exc, "ingest emails")
+                    st.error(f"Database error during ingestion: {error_msg}")
+                    logger.exception("Database error during email ingestion: %s", exc)
+                    return
+                except Exception as exc:
+                    progress_bar.empty()
+                    status_container.empty()
+                    st.error(f"Unexpected error during ingestion: {str(exc)[:200]}")
+                    logger.exception("Unexpected error during email ingestion: %s", exc)
+                    return
                 
                 # Clear progress indicators
                 progress_bar.empty()
@@ -413,8 +433,18 @@ def _render_ingestion_panel(state: AppState) -> None:
 
 @st.fragment
 def _render_batch_panel(state: AppState) -> None:
-    with session_scope() as session:
-        batches = get_batches(session)
+    try:
+        with session_scope() as session:
+            batches = get_batches(session)
+    except OperationalError as exc:
+        error_msg = format_database_error(exc, "load batches")
+        st.error(f"Database error loading batches: {error_msg}")
+        logger.exception("Database error loading batches: %s", exc)
+        return
+    except Exception as exc:
+        st.error(f"Unexpected error loading batches: {str(exc)[:200]}")
+        logger.exception("Unexpected error loading batches: %s", exc)
+        return
 
     if not batches:
         st.info("No batches available yet. Use 'Ingest New Emails' to create one.")
@@ -422,6 +452,12 @@ def _render_batch_panel(state: AppState) -> None:
 
     batch_lookup = {batch.id: batch for batch in batches}
     batch_ids = list(batch_lookup.keys())
+    
+    if not batch_ids:
+        st.warning("No batches available. Please ingest some emails first.")
+        return
+    
+    # Ensure selected_batch_id is in the available options
     if state.selected_batch_id not in batch_ids:
         state.selected_batch_id = batch_ids[0]
 
@@ -438,8 +474,18 @@ def _render_batch_panel(state: AppState) -> None:
     )
     state.selected_batch_id = selected_batch_id
 
-    with session_scope() as session:
-        email_records = get_emails_for_batch(session, state.selected_batch_id)
+    try:
+        with session_scope() as session:
+            email_records = get_emails_for_batch(session, state.selected_batch_id)
+    except OperationalError as exc:
+        error_msg = format_database_error(exc, "load emails for batch")
+        st.error(f"Database error loading emails: {error_msg}")
+        logger.exception("Database error loading emails: %s", exc)
+        return
+    except Exception as exc:
+        st.error(f"Unexpected error loading emails: {str(exc)[:200]}")
+        logger.exception("Unexpected error loading emails: %s", exc)
+        return
 
     state.search_query = st.text_input(
         "Search subject, sender, or hash",
@@ -510,6 +556,41 @@ def _render_batch_panel(state: AppState) -> None:
     # Initialize filter state in session
     if "active_filters" not in st.session_state:
         st.session_state["active_filters"] = []
+
+    # Date Range Filter
+    st.markdown("### Date/Time Filtering")
+    available_date_fields = [
+        ("date_sent", "Date Sent"),
+        ("date_reported", "Date Reported"),
+        ("created_at", "Created At"),
+        ("updated_at", "Updated At"),
+    ]
+    
+    def get_date_value(record: dict, field: str) -> Optional[datetime]:
+        """Extract date value from record."""
+        date_str = record.get(field)
+        if not date_str:
+            return None
+        if isinstance(date_str, datetime):
+            return date_str
+        if isinstance(date_str, str):
+            try:
+                return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                return None
+        return None
+    
+    date_filter = render_date_filter(
+        available_date_fields=available_date_fields,
+        session_state_key="email_date_filter",
+        default_field="date_sent"
+    )
+    
+    # Apply date filter
+    if date_filter and date_filter.get("enabled"):
+        field_key = date_filter["field"]
+        date_accessor = lambda record: get_date_value(record, field_key)
+        filtered = apply_date_filter(filtered, date_filter, date_accessor)
 
     # Advanced Filters UI
     with st.expander("Advanced Filters", expanded=False):
@@ -795,10 +876,14 @@ def _render_batch_panel(state: AppState) -> None:
     # Get current selection from session state (will be updated by widget)
     current_selection = st.session_state.get("report_selection", available_ids.copy() if available_ids else [])
     
+    # Filter current_selection to only include IDs that are in available_ids
+    # This prevents errors when pagination/filtering changes the available options
+    valid_selection = [id for id in current_selection if id in available_ids]
+    
     report_selection = st.multiselect(
         "Emails to include in HTML report",
         options=available_ids,
-        default=current_selection,
+        default=valid_selection,
         format_func=format_email_label,
         key="report_selection",
     )
@@ -810,14 +895,22 @@ def _render_batch_panel(state: AppState) -> None:
 
     with finalize_col:
         if st.button("Finalize Batch", width="stretch"):
-            with session_scope() as session:
-                result = finalize_batch(session, state.selected_batch_id, config=state.config)
-            if result:
-                state.add_notification(f"Finalized batch {result.batch_name}")
-                st.success("Batch finalized and archived.")
-                st.rerun()
-            else:
-                st.error("Unable to finalize batch. Check logs for details.")
+            try:
+                with session_scope() as session:
+                    result = finalize_batch(session, state.selected_batch_id, config=state.config)
+                if result:
+                    state.add_notification(f"Finalized batch {result.batch_name}")
+                    st.success("Batch finalized and archived.")
+                    st.rerun()
+                else:
+                    st.error("Unable to finalize batch. Check logs for details.")
+            except OperationalError as exc:
+                error_msg = format_database_error(exc, "finalize batch")
+                st.error(f"Database error finalizing batch: {error_msg}")
+                logger.exception("Database error finalizing batch: %s", exc)
+            except Exception as exc:
+                st.error(f"Unexpected error finalizing batch: {str(exc)[:200]}")
+                logger.exception("Unexpected error finalizing batch: %s", exc)
 
     with report_col:
         generate_report = st.button("Generate HTML Report", disabled=not report_selection, width="stretch")
@@ -860,7 +953,7 @@ def _render_batch_panel(state: AppState) -> None:
             from app.services.knowledge import add_knowledge_to_emails
             try:
                 result = add_knowledge_to_emails(session, email_ids=report_selection)
-                session.commit()
+                # Don't commit here - session_scope() will handle the commit
                 
                 # Build notification message
                 notification_parts = []
@@ -1008,10 +1101,14 @@ def _render_batch_panel(state: AppState) -> None:
     # Get current selection from session state (will be updated by widget)
     current_promotion_selection = st.session_state.get("promotion_selection", available_ids.copy() if available_ids else [])
     
+    # Filter current_promotion_selection to only include IDs that are in available_ids
+    # This prevents errors when pagination/filtering changes the available options
+    valid_promotion_selection = [id for id in current_promotion_selection if id in available_ids]
+    
     promotion_selection = st.multiselect(
         "Emails to promote to Standard Emails",
         options=available_ids,
-        default=current_promotion_selection,
+        default=valid_promotion_selection,
         format_func=format_email_label,
         key="promotion_selection",
     )
@@ -1075,11 +1172,25 @@ def _render_batch_panel(state: AppState) -> None:
     # Display current position
     st.caption(f"Email {current_index + 1} of {len(available_ids)}")
 
-    with session_scope() as session:
-        email_detail = get_email_detail(session, state.selected_email_id)
+    try:
+        with session_scope() as session:
+            email_detail = get_email_detail(session, state.selected_email_id)
+    except OperationalError as exc:
+        error_msg = format_database_error(exc, "load email details")
+        st.error(f"Database error loading email details: {error_msg}")
+        logger.exception("Database error loading email details: %s", exc)
+        return
+    except ValueError as exc:
+        st.error(f"Invalid email ID: {str(exc)}")
+        logger.warning("Invalid email ID in email display: %s", exc)
+        return
+    except Exception as exc:
+        st.error(f"Unexpected error loading email details: {str(exc)[:200]}")
+        logger.exception("Unexpected error loading email details: %s", exc)
+        return
 
     if not email_detail:
-        st.error("Unable to load email details.")
+        st.error("Unable to load email details. Email may not exist.")
         return
 
     st.subheader("Email Details")
@@ -1237,19 +1348,33 @@ def _render_batch_panel(state: AppState) -> None:
                     "additional_contacts": additional_contacts or None,
                     "model_confidence": model_confidence.strip() if model_confidence else None,
                 }
-                with session_scope() as session:
-                    updated = update_email_record(
-                        session,
-                        state.selected_email_id,
-                        updates,
-                        config=state.config,
-                    )
-                if updated:
-                    state.add_notification(f"Updated email #{state.selected_email_id}")
-                    st.success("Email updated.")
-                    st.rerun()
-                else:
-                    st.error("Update failed. Please check the log for details.")
+                try:
+                    with session_scope() as session:
+                        updated = update_email_record(
+                            session,
+                            state.selected_email_id,
+                            updates,
+                            config=state.config,
+                        )
+                    if updated:
+                        state.add_notification(f"Updated email #{state.selected_email_id}")
+                        st.success("Email updated.")
+                        # Check for pickle update errors
+                        if "_pickle_update_error" in updated:
+                            st.warning(f"Email updated, but pickle file update failed: {updated['_pickle_update_error']}")
+                        st.rerun()
+                    else:
+                        st.error("Update failed. Email may not exist.")
+                except OperationalError as exc:
+                    error_msg = format_database_error(exc, "update email record")
+                    st.error(f"Database error updating email: {error_msg}")
+                    logger.exception("Database error updating email: %s", exc)
+                except ValueError as exc:
+                    st.error(f"Invalid input: {str(exc)}")
+                    logger.warning("Invalid input in email update: %s", exc)
+                except Exception as exc:
+                    st.error(f"Unexpected error updating email: {str(exc)[:200]}")
+                    logger.exception("Unexpected error updating email: %s", exc)
 
 
 def render(state: AppState) -> None:

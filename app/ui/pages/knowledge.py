@@ -8,8 +8,10 @@ from typing import Dict, List, Optional
 import pandas as pd
 import streamlit as st
 from loguru import logger
+from sqlalchemy.exc import OperationalError
 
 from app.db.init_db import session_scope
+from app.utils.error_handling import format_database_error
 from app.db.models import KnowledgeDomain, KnowledgeTableMetadata, KnowledgeTN
 from app.services.knowledge import (
     add_knowledge_to_emails,
@@ -97,7 +99,7 @@ def _render_table_initialization(state: AppState, table_name: str, display_name:
                             primary_key_column=primary_key_col,
                             schema=schema,
                         )
-                        session.commit()
+                        # Don't commit here - session_scope() will handle the commit
                         st.success(f"✅ {display_name} initialized successfully!")
                         st.rerun()
                     except ValueError as exc:
@@ -159,38 +161,42 @@ def _render_data_upload(state: AppState, table_name: str, display_name: str) -> 
             st.dataframe(df.head(5), use_container_width=True)
             
             if st.button(f"Upload to {display_name}", key=f"btn_upload_{table_name}"):
-                with session_scope() as session:
-                    try:
-                        result = upload_knowledge_data(session, table_name, df)
-                        session.commit()
-                        
-                        # Show detailed results
-                        if result.records_added > 0:
-                            st.success(
-                                f"✅ Uploaded {result.records_added} records to {display_name}!"
-                            )
-                        else:
-                            st.warning("⚠️ No records were uploaded.")
-                        
-                        if result.records_skipped > 0:
-                            st.warning(
-                                f"⚠️ Skipped {result.records_skipped} records due to errors."
-                            )
-                        
-                        if result.errors:
-                            with st.expander(f"View {len(result.errors)} errors", expanded=False):
-                                for error in result.errors[:20]:  # Show first 20 errors
-                                    st.text(error)
-                                if len(result.errors) > 20:
-                                    st.caption(f"... and {len(result.errors) - 20} more errors")
-                        
-                        if result.records_added > 0:
-                            st.rerun()
-                    except ValueError as exc:
-                        st.error(f"Validation error: {exc}")
-                    except Exception as exc:
-                        st.error(f"Failed to upload data: {exc}")
-                        logger.exception("Failed to upload knowledge data")
+                try:
+                    with session_scope() as session:
+                        try:
+                            result = upload_knowledge_data(session, table_name, df)
+                            # Don't commit here - session_scope() will handle the commit
+                            
+                            # Show detailed results
+                            if result.records_added > 0:
+                                st.success(
+                                    f"✅ Uploaded {result.records_added} records to {display_name}!"
+                                )
+                            else:
+                                st.warning("⚠️ No records were uploaded.")
+                            
+                            if result.records_skipped > 0:
+                                st.warning(
+                                    f"⚠️ Skipped {result.records_skipped} records due to errors."
+                                )
+                            
+                            if result.errors:
+                                with st.expander(f"View {len(result.errors)} errors", expanded=False):
+                                    for error in result.errors[:20]:  # Show first 20 errors
+                                        st.text(error)
+                                    if len(result.errors) > 20:
+                                        st.caption(f"... and {len(result.errors) - 20} more errors")
+                            
+                            if result.records_added > 0:
+                                st.rerun()
+                        except ValueError as exc:
+                            st.error(f"Validation error: {exc}")
+                        except Exception as exc:
+                            st.error(f"Failed to upload data: {exc}")
+                            logger.exception("Failed to upload knowledge data")
+                except Exception as exc:
+                    st.error(f"Failed to upload data: {exc}")
+                    logger.exception("Failed to upload knowledge data")
         except pd.errors.EmptyDataError:
             st.error("CSV file is empty or malformed.")
         except pd.errors.ParserError as exc:
@@ -228,10 +234,14 @@ def _render_column_selection(state: AppState, table_name: str, display_name: str
     # Get current selection
     current_selection = metadata.selected_columns or []
     
+    # Filter current_selection to only include columns that are in available_columns
+    # This prevents errors when the table schema changes
+    valid_selection = [col for col in current_selection if col in available_columns]
+    
     selected = st.multiselect(
         f"Select columns to include in 'Add Knowledge' for {display_name}",
         options=available_columns,
-        default=current_selection,
+        default=valid_selection,
         key=f"select_{table_name}",
         help="These columns will be added to the Batch Summary when 'Add Knowledge' is run.",
     )
@@ -256,7 +266,7 @@ def _render_column_selection(state: AppState, table_name: str, display_name: str
                     return
                 
                 metadata.selected_columns = selected
-                session.commit()
+                # Don't commit here - session_scope() will handle the commit
                 st.success(f"✅ Column selection saved for {display_name}!")
                 st.rerun()
             except Exception as exc:

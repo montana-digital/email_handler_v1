@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 from app.db.models import InputEmail, StandardEmail
@@ -7,8 +8,11 @@ from app.services.standard_emails import promote_to_standard_emails
 
 
 def _make_input_email() -> InputEmail:
+    # Use proper SHA256 hash (64 characters) for validation
+    test_content = b"test email content for hashing"
+    email_hash = hashlib.sha256(test_content).hexdigest()
     return InputEmail(
-        email_hash="hash-123",
+        email_hash=email_hash,
         subject="Test Subject",
         sender="alerts@example.com",
         cc=json.dumps(["cc1@example.com", "cc2@example.com"]),

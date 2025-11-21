@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import math
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -18,6 +19,7 @@ from app.services.attachments import (
     list_attachment_records,
 )
 from app.services.email_records import get_batches
+from app.ui.components.date_filter import apply_date_filter, render_date_filter
 from app.ui.state import AppState
 from app.ui.utils.images import display_image_with_dialog
 
@@ -34,10 +36,15 @@ def render(state: AppState) -> None:
         batch_options[batch.id] = f"{batch.batch_name} ({batch.record_count} emails)"
 
     default_batch_key = state.selected_batch_id if state.selected_batch_id in batch_options else 0
+    batch_keys = list(batch_options.keys())
+    # Ensure default_batch_key is in the list
+    if default_batch_key not in batch_keys:
+        default_batch_key = batch_keys[0] if batch_keys else 0
+    
     selected_batch_key = st.selectbox(
         "Select batch",
-        options=list(batch_options.keys()),
-        index=list(batch_options.keys()).index(default_batch_key),
+        options=batch_keys,
+        index=batch_keys.index(default_batch_key) if batch_keys else 0,
         format_func=lambda value: batch_options[value],
     )
     state.selected_batch_id = selected_batch_key if selected_batch_key != 0 else None
@@ -116,6 +123,35 @@ def render(state: AppState) -> None:
     # Initialize filter state in session
     if "attachment_active_filters" not in st.session_state:
         st.session_state["attachment_active_filters"] = []
+
+    # Date Range Filter
+    st.markdown("### Date/Time Filtering")
+    available_date_fields = [
+        ("email_date_sent", "Email Date Sent"),
+        ("created_at", "Attachment Created At"),
+    ]
+    
+    def get_date_value(record: dict, field: str) -> Optional[datetime]:
+        """Extract date value from record."""
+        date_str = record.get(field)
+        if not date_str:
+            return None
+        if isinstance(date_str, datetime):
+            return date_str
+        if isinstance(date_str, str):
+            try:
+                # Handle ISO format strings
+                date_str = date_str.replace("Z", "+00:00")
+                return datetime.fromisoformat(date_str)
+            except (ValueError, AttributeError):
+                return None
+        return None
+    
+    date_filter = render_date_filter(
+        available_date_fields=available_date_fields,
+        session_state_key="attachment_date_filter",
+        default_field="email_date_sent"
+    )
 
     # Advanced Filters UI
     with st.expander("Advanced Filters", expanded=False):
@@ -226,6 +262,13 @@ def render(state: AppState) -> None:
 
     # Apply all active filters
     filtered_records = attachments
+    
+    # Apply date filter first
+    if date_filter and date_filter.get("enabled"):
+        field_key = date_filter["field"]
+        date_accessor = lambda record: get_date_value(record, field_key)
+        filtered_records = apply_date_filter(filtered_records, date_filter, date_accessor)
+    
     for filter_config in st.session_state["attachment_active_filters"]:
         column_name = filter_config["column"]
         selected_values = filter_config["values"]
@@ -308,10 +351,14 @@ def render(state: AppState) -> None:
     # Get current selection from session state (will be updated by widget)
     current_attachment_selection = st.session_state.get("attachment_selection", [])
     
+    # Filter current_attachment_selection to only include IDs that are in page_attachment_ids
+    # This prevents errors when pagination/filtering changes the available options
+    valid_attachment_selection = [id for id in current_attachment_selection if id in page_attachment_ids]
+    
     selected_ids = st.multiselect(
         "Select attachments to export",
         options=page_attachment_ids,
-        default=current_attachment_selection,
+        default=valid_attachment_selection,
         format_func=lambda attachment_id: next(
             (f"{record['file_name']} (Subject ID: {record.get('subject_id') or 'N/A'})" 
              for record in page_records if record["id"] == attachment_id),
