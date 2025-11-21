@@ -15,13 +15,14 @@ import streamlit as st
 from app.config import PROJECT_ROOT
 from app.services.parsing import parser_capabilities
 from app.ui.state import AppState
+from app.utils.version import get_app_version
 
 try:
     import psutil  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
     psutil = None
 
-APP_VERSION = "0.5.0"
+APP_VERSION = get_app_version()
 LOGO_CANDIDATES = [
     Path("assets/logo.png"),
     Path("public/logo.png"),

@@ -12,7 +12,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 from loguru import logger
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.db.models import Attachment, InputEmail, PickleBatch
 
@@ -44,13 +44,31 @@ def detect_category(attachment: Attachment) -> AttachmentCategory:
 
 
 def build_destination_name(attachment: Attachment) -> str:
+    """Build destination filename with subjectID prefix from the email.
+    
+    Fallback chain:
+    1. attachment.subject_id (if set on attachment)
+    2. input_email.subject_id (from associated email)
+    3. input_email.email_hash (if subject_id is None)
+    4. attachment.id (if no email relationship exists)
+    
+    Always returns a prefixed filename for consistency.
+    """
     base_name = attachment.file_name or f"attachment_{attachment.id}"
+    
+    # Get subject_id from attachment first
     prefix = attachment.subject_id
+    
+    # If not available, get from associated email (eagerly loaded in export_attachments)
     if not prefix and attachment.input_email:
         prefix = attachment.input_email.subject_id or attachment.input_email.email_hash
-    if prefix:
-        return f"{prefix}_{base_name}"
-    return base_name
+    
+    # Final fallback: use attachment ID if no email relationship exists
+    if not prefix:
+        prefix = f"att_{attachment.id}"
+    
+    # Always return prefixed filename
+    return f"{prefix}_{base_name}"
 
 
 def export_attachments(
@@ -60,51 +78,119 @@ def export_attachments(
     *,
     create_archive: bool = True,
 ) -> tuple[List[AttachmentExportResult], Path | None]:
-    """Copy attachments into organized folders and optionally create a zip archive."""
+    """Copy attachments into organized folders and optionally create a zip archive.
+    
+    Returns:
+        Tuple of (export_results, archive_path)
+        - export_results: List of successfully exported attachments
+        - archive_path: Path to ZIP archive if created, None otherwise
+    
+    Raises:
+        ValueError: If no attachment_ids provided
+        OSError: If destination directory cannot be created
+        PermissionError: If insufficient permissions for file operations
+    """
     if not attachment_ids:
         return [], None
 
-    destination_root.mkdir(parents=True, exist_ok=True)
+    try:
+        destination_root.mkdir(parents=True, exist_ok=True)
+    except (OSError, PermissionError) as exc:
+        logger.error("Failed to create destination directory %s: %s", destination_root, exc)
+        raise
 
-    attachments = session.query(Attachment).filter(Attachment.id.in_(attachment_ids)).all()
+    # Eagerly load the input_email relationship to ensure we can access subject_id
+    try:
+        attachments = (
+            session.query(Attachment)
+            .options(joinedload(Attachment.input_email))
+            .filter(Attachment.id.in_(attachment_ids))
+            .all()
+        )
+    except Exception as exc:
+        logger.error("Failed to query attachments: %s", exc)
+        raise ValueError(f"Failed to load attachments from database: {exc}") from exc
+
+    if not attachments:
+        logger.warning("No attachments found for IDs: %s", attachment_ids)
+        return [], None
+
     results: List[AttachmentExportResult] = []
+    skipped_count = 0
 
     for attachment in attachments:
         if not attachment.storage_path:
             logger.warning("Attachment %s is missing a storage_path; skipping", attachment.id)
+            skipped_count += 1
             continue
 
         source_path = Path(attachment.storage_path)
         if not source_path.exists():
             logger.warning("Attachment source %s does not exist; skipping", source_path)
+            skipped_count += 1
             continue
 
-        category = detect_category(attachment)
-        category_dir = destination_root / category.value
-        category_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            category = detect_category(attachment)
+            category_dir = destination_root / category.value
+            category_dir.mkdir(parents=True, exist_ok=True)
 
-        destination_name = build_destination_name(attachment)
-        destination_path = category_dir / destination_name
+            destination_name = build_destination_name(attachment)
+            destination_path = category_dir / destination_name
 
-        shutil.copy2(source_path, destination_path)
-        results.append(
-            AttachmentExportResult(
-                attachment_id=attachment.id,
-                source_path=source_path,
-                destination_path=destination_path,
-                category=category,
+            # Check for duplicate filenames and append number if needed
+            original_destination = destination_path
+            counter = 1
+            while destination_path.exists():
+                stem = original_destination.stem
+                suffix = original_destination.suffix
+                destination_path = category_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+            shutil.copy2(source_path, destination_path)
+            results.append(
+                AttachmentExportResult(
+                    attachment_id=attachment.id,
+                    source_path=source_path,
+                    destination_path=destination_path,
+                    category=category,
+                )
             )
-        )
+        except PermissionError as exc:
+            logger.error("Permission denied copying %s to %s: %s", source_path, destination_path, exc)
+            skipped_count += 1
+        except OSError as exc:
+            logger.error("OS error copying %s to %s: %s", source_path, destination_path, exc)
+            skipped_count += 1
+        except Exception as exc:
+            logger.exception("Unexpected error processing attachment %s: %s", attachment.id, exc)
+            skipped_count += 1
+
+    if skipped_count > 0:
+        logger.warning("Skipped %d attachments during export", skipped_count)
 
     archive_path: Path | None = None
     if create_archive and results:
         archive_path = destination_root.with_suffix(".zip")
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for result in results:
-                archive.write(
-                    result.destination_path,
-                    arcname=result.destination_path.relative_to(destination_root),
-                )
+        try:
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for result in results:
+                    try:
+                        archive.write(
+                            result.destination_path,
+                            arcname=result.destination_path.relative_to(destination_root),
+                        )
+                    except Exception as exc:
+                        logger.error("Failed to add %s to archive: %s", result.destination_path, exc)
+        except zipfile.BadZipFile as exc:
+            logger.error("Failed to create ZIP archive %s: %s", archive_path, exc)
+            archive_path = None
+        except OSError as exc:
+            logger.error("OS error creating ZIP archive %s: %s", archive_path, exc)
+            archive_path = None
+        except Exception as exc:
+            logger.exception("Unexpected error creating ZIP archive: %s", exc)
+            archive_path = None
 
     return results, archive_path
 
@@ -166,67 +252,119 @@ def generate_image_grid_report(
 ) -> Path:
     """Generate an HTML report with images in a grid layout, including numbers and URL information.
     
-    Returns the path to the generated HTML file.
+    Args:
+        session: Database session
+        attachment_ids: List of attachment IDs to include
+        output_path: Path where the HTML report should be saved
+    
+    Returns:
+        Path to the generated HTML file
+    
+    Raises:
+        ValueError: If no image attachments found or invalid input
+        OSError: If file cannot be written
+        PermissionError: If insufficient permissions
     """
     from app.db.models import Attachment, InputEmail
     import base64
     
-    attachments = session.query(Attachment).filter(Attachment.id.in_(attachment_ids)).all()
+    if not attachment_ids:
+        raise ValueError("No attachment IDs provided")
+    
+    try:
+        attachments = session.query(Attachment).filter(Attachment.id.in_(attachment_ids)).all()
+    except Exception as exc:
+        logger.error("Failed to query attachments for image grid: %s", exc)
+        raise ValueError(f"Failed to load attachments from database: {exc}") from exc
+    
+    if not attachments:
+        raise ValueError(f"No attachments found for provided IDs: {attachment_ids}")
     
     # Filter to only images
     image_attachments = [att for att in attachments if detect_category(att) == AttachmentCategory.IMAGES]
     
     if not image_attachments:
-        raise ValueError("No image attachments found in selection")
+        raise ValueError(f"No image attachments found in selection of {len(attachments)} attachments")
     
     # Get related email information for each attachment
     image_data = []
+    images_loaded = 0
+    images_failed = 0
+    
     for idx, attachment in enumerate(image_attachments, 1):
-        email = attachment.input_email if attachment.input_email_id else None
-        
-        # Get URLs from email
-        urls = []
-        if email:
-            import json
-            try:
-                url_parsed = json.loads(email.url_parsed or "[]")
-                urls = url_parsed if isinstance(url_parsed, list) else []
-            except (json.JSONDecodeError, TypeError):
-                pass
-        
-        # Read image and convert to base64 for embedding
-        image_base64 = None
-        if attachment.storage_path:
-            image_path = Path(attachment.storage_path)
-            if image_path.exists():
+        try:
+            email = attachment.input_email if attachment.input_email_id else None
+            
+            # Get URLs from email
+            urls = []
+            if email:
+                import json
                 try:
-                    image_bytes = image_path.read_bytes()
-                    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-                    # Determine MIME type from extension
-                    suffix = image_path.suffix.lower()
-                    mime_type = {
-                        ".png": "image/png",
-                        ".jpg": "image/jpeg",
-                        ".jpeg": "image/jpeg",
-                        ".gif": "image/gif",
-                        ".bmp": "image/bmp",
-                        ".tiff": "image/tiff",
-                        ".svg": "image/svg+xml",
-                    }.get(suffix, "image/png")
-                except Exception as e:
-                    logger.warning("Failed to read image %s: %s", image_path, e)
+                    url_parsed = json.loads(email.url_parsed or "[]")
+                    urls = url_parsed if isinstance(url_parsed, list) else []
+                except (json.JSONDecodeError, TypeError) as exc:
+                    logger.debug("Failed to parse URLs for email %s: %s", email.id if email else None, exc)
+            
+            # Read image and convert to base64 for embedding
+            image_base64 = None
+            mime_type = None  # Initialize mime_type to avoid "cannot access local variable" error
+            if attachment.storage_path:
+                image_path = Path(attachment.storage_path)
+                if image_path.exists():
+                    try:
+                        # Check file size to avoid loading huge images into memory
+                        file_size = image_path.stat().st_size
+                        MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB limit for base64 encoding
+                        if file_size > MAX_IMAGE_SIZE:
+                            logger.warning("Image %s is too large (%d bytes), skipping base64 encoding", image_path, file_size)
+                        else:
+                            image_bytes = image_path.read_bytes()
+                            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+                            # Determine MIME type from extension
+                            suffix = image_path.suffix.lower()
+                            mime_type = {
+                                ".png": "image/png",
+                                ".jpg": "image/jpeg",
+                                ".jpeg": "image/jpeg",
+                                ".gif": "image/gif",
+                                ".bmp": "image/bmp",
+                                ".tiff": "image/tiff",
+                                ".svg": "image/svg+xml",
+                            }.get(suffix, "image/png")
+                            images_loaded += 1
+                    except PermissionError as exc:
+                        logger.warning("Permission denied reading image %s: %s", image_path, exc)
+                        images_failed += 1
+                    except MemoryError as exc:
+                        logger.error("Out of memory reading image %s: %s", image_path, exc)
+                        images_failed += 1
+                    except Exception as exc:
+                        logger.warning("Failed to read image %s: %s", image_path, exc)
+                        images_failed += 1
+                else:
+                    logger.warning("Image path does not exist: %s", image_path)
+                    images_failed += 1
+            else:
+                logger.warning("Attachment %s has no storage_path", attachment.id)
+                images_failed += 1
         
-        image_data.append({
-            "number": idx,
-            "attachment_id": attachment.id,
-            "file_name": attachment.file_name or f"image_{attachment.id}",
-            "subject_id": attachment.subject_id or (email.subject_id if email else None),
-            "urls": urls,
-            "email_subject": email.subject if email else None,
-            "email_sender": email.sender if email else None,
-            "image_base64": image_base64,
-            "mime_type": mime_type if image_base64 else None,
-        })
+            image_data.append({
+                "number": idx,
+                "attachment_id": attachment.id,
+                "file_name": attachment.file_name or f"image_{attachment.id}",
+                "subject_id": attachment.subject_id or (email.subject_id if email else None),
+                "urls": urls,
+                "email_subject": email.subject if email else None,
+                "email_sender": email.sender if email else None,
+                "image_base64": image_base64,
+                "mime_type": mime_type,
+            })
+        except Exception as exc:
+            logger.exception("Unexpected error processing attachment %s for image grid: %s", attachment.id, exc)
+            images_failed += 1
+    
+    if images_failed > 0:
+        logger.warning("Failed to load %d images out of %d total", images_failed, len(image_attachments))
     
     # Generate HTML with grid layout
     html_content = f"""<!DOCTYPE html>
@@ -383,6 +521,21 @@ def generate_image_grid_report(
 </html>
 """
     
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html_content, encoding="utf-8")
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    except (OSError, PermissionError) as exc:
+        logger.error("Failed to create output directory %s: %s", output_path.parent, exc)
+        raise
+    
+    try:
+        output_path.write_text(html_content, encoding="utf-8")
+        logger.info("Generated image grid report with %d images (%d loaded, %d failed) at %s", 
+                   len(image_data), images_loaded, images_failed, output_path)
+    except (OSError, PermissionError) as exc:
+        logger.error("Failed to write image grid report to %s: %s", output_path, exc)
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected error writing image grid report: %s", exc)
+        raise
+    
     return output_path

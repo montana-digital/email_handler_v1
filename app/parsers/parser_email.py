@@ -26,8 +26,7 @@ from app.parsers.parser_phones import extract_phone_numbers
 from app.parsers.parser_urls import extract_urls
 
 BODY_FIELD_PATTERN = re.compile(
-    r"^\s*(?P<field>[A-Za-z _-]+):\s*(?P<value>.*?)(?=\n\s*[A-Za-z _-]+:|$)",
-    re.MULTILINE | re.DOTALL,
+    r"^\s*(?P<field>[A-Za-z _-]+):\s*(?P<value>.*)$",
 )
 DATA_URI_PATTERN = re.compile(r"data:image/(?P<format>[a-zA-Z0-9.+-]+);base64,(?P<data>[A-Za-z0-9+/=]+)")
 
@@ -139,6 +138,9 @@ def _html_to_text(html_content: str | None) -> str | None:
 def _extract_body_fields(body_text: str | None) -> dict[str, str]:
     """Extract structured fields from email body text.
     
+    Fields are inline: field name followed by value on the same line.
+    If a field is found but the value is blank/empty, it is set to "not available".
+    
     Handles both plain text and HTML content by converting HTML to text first.
     """
     if not body_text:
@@ -148,15 +150,25 @@ def _extract_body_fields(body_text: str | None) -> dict[str, str]:
     if body_text.strip().startswith("<") and ">" in body_text:
         body_text = _html_to_text(body_text) or body_text
     
-    matches = BODY_FIELD_PATTERN.finditer(body_text)
     data: dict[str, str] = {}
-    for match in matches:
-        field = match.group("field").strip().lower().replace(" ", "_")
-        value = match.group("value").strip()
-        # Remove trailing newlines and normalize whitespace
-        value = " ".join(value.split())
-        if value:  # Only add non-empty values
+    # Process line by line to handle inline fields correctly
+    for line in body_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Match pattern: "Field Name: value" on the same line
+        match = BODY_FIELD_PATTERN.match(line)
+        if match:
+            field = match.group("field").strip().lower().replace(" ", "_")
+            value = match.group("value").strip()
+            # Normalize whitespace
+            value = " ".join(value.split())
+            # If value is empty/blank, set to "not available"
+            if not value:
+                value = "not available"
             data[field] = value
+    
     return data
 
 

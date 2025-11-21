@@ -374,30 +374,46 @@ def render(state: AppState) -> None:
                         / "exports"
                         / f"images_{datetime.now().strftime('%Y%m%dT%H%M%S')}"
                     )
-                    with session_scope() as session:
-                        results, archive_path = export_attachments(
-                            session,
-                            attachment_ids=selected_ids,
-                            destination_root=destination_root,
-                        )
+                    try:
+                        with session_scope() as session:
+                            results, archive_path = export_attachments(
+                                session,
+                                attachment_ids=selected_ids,
+                                destination_root=destination_root,
+                            )
 
-                    if results:
-                        state.add_notification(
-                            f"Exported {len(results)} images to {destination_root}"
-                        )
-                        st.success(f"Exported {len(results)} images to {destination_root}")
+                        if results:
+                            state.add_notification(
+                                f"Exported {len(results)} images to {destination_root}"
+                            )
+                            st.success(f"Exported {len(results)} images to {destination_root}")
 
-                        if archive_path and archive_path.exists():
-                            with archive_path.open("rb") as handle:
-                                st.download_button(
-                                    label="Download ZIP",
-                                    data=handle.read(),
-                                    file_name=archive_path.name,
-                                    mime="application/zip",
-                                    key=f"download_zip_{archive_path.stem}",
-                                )
-                    else:
-                        st.warning("No images were exported. They may lack storage paths.")
+                            if archive_path and archive_path.exists():
+                                try:
+                                    with archive_path.open("rb") as handle:
+                                        st.download_button(
+                                            label="Download ZIP",
+                                            data=handle.read(),
+                                            file_name=archive_path.name,
+                                            mime="application/zip",
+                                            key=f"download_zip_{archive_path.stem}",
+                                        )
+                                except Exception as exc:
+                                    st.error(f"Failed to read ZIP file: {exc}")
+                                    logger.exception("Failed to read ZIP for download")
+                            else:
+                                st.warning("ZIP archive was not created. Check logs for details.")
+                        else:
+                            st.warning("No images were exported. They may lack storage paths or have permission issues.")
+                    except ValueError as exc:
+                        st.error(f"Invalid input: {exc}")
+                    except PermissionError as exc:
+                        st.error(f"Permission denied: {exc}. Check file permissions.")
+                    except OSError as exc:
+                        st.error(f"File system error: {exc}. Check disk space and permissions.")
+                    except Exception as exc:
+                        st.error(f"Failed to export images: {exc}")
+                        logger.exception("Image export failed")
             
             with category_cols[2]:
                 st.caption("Select other attachments for different export options")

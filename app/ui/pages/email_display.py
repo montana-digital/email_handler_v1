@@ -793,57 +793,62 @@ def _render_batch_panel(state: AppState) -> None:
         csv_full_path = Path(artefacts_state["csv_full"])
         with artifact_cols[0]:
             if html_path.exists():
-                with html_path.open("rb") as handle:
-                    st.download_button(
-                        label="Download HTML Report",
-                        data=handle.read(),
-                        file_name=html_path.name,
-                        mime="text/html",
-                        key=f"download_report_{html_path.stem}",
-                    )
+                # Read file content into memory before passing to download button
+                html_content = html_path.read_bytes()
+                st.download_button(
+                    label="Download HTML Report",
+                    data=html_content,
+                    file_name=html_path.name,
+                    mime="text/html",
+                    key=f"download_report_{html_path.stem}",
+                )
             if csv_text_path.exists():
-                with csv_text_path.open("rb") as handle:
-                    st.download_button(
-                        label="Download CSV (Text)",
-                        data=handle.read(),
-                        file_name=csv_text_path.name,
-                        mime="text/csv",
-                        key=f"download_csv_text_{csv_text_path.stem}",
-                    )
+                # Read file content into memory before passing to download button
+                csv_text_content = csv_text_path.read_bytes()
+                st.download_button(
+                    label="Download CSV (Text)",
+                    data=csv_text_content,
+                    file_name=csv_text_path.name,
+                    mime="text/csv",
+                    key=f"download_csv_text_{csv_text_path.stem}",
+                )
         with artifact_cols[1]:
             if csv_full_path.exists():
-                with csv_full_path.open("rb") as handle:
-                    st.download_button(
-                        label="Download CSV (Full)",
-                        data=handle.read(),
-                        file_name=csv_full_path.name,
-                        mime="text/csv",
-                        key=f"download_csv_full_{csv_full_path.stem}",
-                    )
+                # Read file content into memory before passing to download button
+                csv_full_content = csv_full_path.read_bytes()
+                st.download_button(
+                    label="Download CSV (Full)",
+                    data=csv_full_content,
+                    file_name=csv_full_path.name,
+                    mime="text/csv",
+                    key=f"download_csv_full_{csv_full_path.stem}",
+                )
             attachments_path = artefacts_state.get("attachments_zip")
             if attachments_path:
                 path_obj = Path(attachments_path)
                 if path_obj.exists():
-                    with path_obj.open("rb") as handle:
-                        st.download_button(
-                            label="Download All Attachments (ZIP)",
-                            data=handle.read(),
-                            file_name=path_obj.name,
-                            mime="application/zip",
-                            key=f"download_zip_attachments_{path_obj.stem}",
-                        )
+                    # Read file content into memory before passing to download button
+                    attachments_content = path_obj.read_bytes()
+                    st.download_button(
+                        label="Download All Attachments (ZIP)",
+                        data=attachments_content,
+                        file_name=path_obj.name,
+                        mime="application/zip",
+                        key=f"download_zip_attachments_{path_obj.stem}",
+                    )
             emails_zip = artefacts_state.get("emails_zip")
             if emails_zip:
                 path_obj = Path(emails_zip)
                 if path_obj.exists():
-                    with path_obj.open("rb") as handle:
-                        st.download_button(
-                            label="Download All Emails (ZIP)",
-                            data=handle.read(),
-                            file_name=path_obj.name,
-                            mime="application/zip",
-                            key=f"download_zip_emails_{path_obj.stem}",
-                        )
+                    # Read file content into memory before passing to download button
+                    emails_content = path_obj.read_bytes()
+                    st.download_button(
+                        label="Download All Emails (ZIP)",
+                        data=emails_content,
+                        file_name=path_obj.name,
+                        mime="application/zip",
+                        key=f"download_zip_emails_{path_obj.stem}",
+                    )
 
     # Initialize promotion selection in session state if not exists
     if "promotion_selection" not in st.session_state:
@@ -1017,14 +1022,15 @@ def _render_batch_panel(state: AppState) -> None:
                         )
 
                     if file_path.exists():
-                        with file_path.open("rb") as handle:
-                            st.download_button(
-                                label=f"Download {file_name}",
-                                data=handle.read(),
-                                file_name=file_name,
-                                mime=file_type or "application/octet-stream",
-                                key=f"download_attachment_{attachment['id']}",
-                            )
+                        # Read file content into memory before passing to download button
+                        attachment_content = file_path.read_bytes()
+                        st.download_button(
+                            label=f"Download {file_name}",
+                            data=attachment_content,
+                            file_name=file_name,
+                            mime=file_type or "application/octet-stream",
+                            key=f"download_attachment_{attachment['id']}",
+                        )
                     else:
                         st.info("Attachment file not found on disk; regenerate or re-ingest to restore.")
             else:
