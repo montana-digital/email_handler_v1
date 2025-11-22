@@ -16,6 +16,7 @@ from app.db.models import KnowledgeDomain, KnowledgeTableMetadata, KnowledgeTN, 
 from app.parsers.parser_phones import extract_phone_numbers
 from app.parsers.parser_urls import extract_urls
 from app.utils.error_handling import format_database_error
+from app.utils.json_helpers import safe_json_dumps, safe_json_loads_list
 
 
 @dataclass
@@ -312,10 +313,7 @@ def upload_knowledge_data(
                     errors.append(f"Row {idx + 1}: Failed to normalize domain '{pk_value_raw}'")
                     continue
             
-            if not pk_value:
-                records_skipped += 1
-                errors.append(f"Row {idx + 1}: Failed to normalize primary key '{pk_value_raw}'")
-                continue
+            # pk_value is guaranteed to be truthy here due to checks above
             
             # Prepare data dict (all columns except primary key)
             data_dict = {}
@@ -336,7 +334,6 @@ def upload_knowledge_data(
             
             # Validate data_dict can be serialized to JSON
             try:
-                from app.utils.json_helpers import safe_json_dumps
                 safe_json_dumps(data_dict)  # Test serialization
             except (TypeError, ValueError) as exc:
                 records_skipped += 1
@@ -512,7 +509,6 @@ def add_knowledge_to_emails(
             
             # Match phone numbers
             if tn_metadata and tn_selected:
-                from app.utils.json_helpers import safe_json_loads_list
                 phone_numbers = safe_json_loads_list(email.callback_number_parsed)
                 
                 for phone in phone_numbers:
@@ -532,13 +528,14 @@ def add_knowledge_to_emails(
                                     if col in tn_record.data:
                                         knowledge_updates[col] = tn_record.data[col]
                                 stats.matched_tns += 1
+                                logger.debug("Matched phone %s for email %d, found columns: %s", 
+                                           normalized, email.id, list(knowledge_updates.keys()))
                                 break  # Use first match
                         except Exception as exc:
                             logger.warning("Error querying knowledge for phone %s: %s", normalized, exc)
             
             # Match domains
             if domain_metadata and domain_selected:
-                from app.utils.json_helpers import safe_json_loads_list
                 domains = safe_json_loads_list(email.url_parsed)
                 
                 for domain in domains:
@@ -558,6 +555,8 @@ def add_knowledge_to_emails(
                                     if col in domain_record.data:
                                         knowledge_updates[col] = domain_record.data[col]
                                 stats.matched_domains += 1
+                                logger.debug("Matched domain %s for email %d, found columns: %s", 
+                                           normalized, email.id, list(knowledge_updates.keys()))
                                 break  # Use first match
                         except Exception as exc:
                             logger.warning("Error querying knowledge for domain %s: %s", normalized, exc)
@@ -580,21 +579,29 @@ def add_knowledge_to_emails(
                 existing[col] = "not available"
             
             # Then, update with matched knowledge (this overwrites "not available" for matched columns)
-            existing.update(knowledge_updates)
+            if knowledge_updates:
+                existing.update(knowledge_updates)
+                logger.debug("Updated email %d knowledge_data with matches: %s", 
+                           email.id, list(knowledge_updates.keys()))
             
-            # Validate the dict can be serialized to JSON
-            try:
-                from app.utils.json_helpers import safe_json_dumps
-                safe_json_dumps(existing)
-            except (TypeError, ValueError) as exc:
-                logger.error("Cannot serialize knowledge_data for email %d: %s", email.id, exc)
-                stats.errors += 1
-                stats.error_details.append(f"Email {email.id}: Invalid data types in knowledge_data")
-                continue
-            
-            # Assign new dict to trigger SQLAlchemy change detection
-            email.knowledge_data = existing
-            stats.updated += 1
+            # Only update if we have selected columns to track
+            if all_selected:
+                # Validate the dict can be serialized to JSON
+                try:
+                    safe_json_dumps(existing)
+                except (TypeError, ValueError) as exc:
+                    logger.error("Cannot serialize knowledge_data for email %d: %s", email.id, exc)
+                    stats.errors += 1
+                    stats.error_details.append(f"Email {email.id}: Invalid data types in knowledge_data")
+                    continue
+                
+                # Assign new dict to trigger SQLAlchemy change detection
+                email.knowledge_data = existing
+                stats.updated += 1
+                logger.debug("Updated knowledge_data for email %d with %d columns: %s", 
+                            email.id, len(existing), list(existing.keys()))
+            else:
+                logger.warning("No columns selected for knowledge enrichment, skipping email %d", email.id)
             
         except Exception as exc:
             stats.errors += 1
@@ -605,6 +612,8 @@ def add_knowledge_to_emails(
     
     try:
         session.flush()
+        logger.info("Flushed knowledge enrichment changes: %d updated, %d matched TNs, %d matched domains, %d errors", 
+                   stats.updated, stats.matched_tns, stats.matched_domains, stats.errors)
     except Exception as exc:
         logger.error("Failed to flush knowledge enrichment changes: %s", exc)
         session.rollback()

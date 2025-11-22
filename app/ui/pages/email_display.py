@@ -949,54 +949,81 @@ def _render_batch_panel(state: AppState) -> None:
         else:
             st.error("Takedown bundle generation failed. Check logs for details.")
     if add_knowledge:
-        with session_scope() as session:
-            from app.services.knowledge import add_knowledge_to_emails
-            try:
-                result = add_knowledge_to_emails(session, email_ids=report_selection)
-                # Don't commit here - session_scope() will handle the commit
-                
-                # Build notification message
-                notification_parts = []
+        try:
+            result = None
+            # Add knowledge in one session
+            with session_scope() as session:
+                from app.services.knowledge import add_knowledge_to_emails
+                try:
+                    result = add_knowledge_to_emails(session, email_ids=report_selection)
+                    # Session will commit automatically on exit from context manager
+                    logger.info("Knowledge enrichment completed: %d updated, %d matched TNs, %d matched domains", 
+                               result.updated, result.matched_tns, result.matched_domains)
+                except ValueError as exc:
+                    st.error(f"Cannot add knowledge: {exc}")
+                    logger.warning("Validation error adding knowledge: %s", exc)
+                    return  # Stop here if validation fails
+                except Exception as exc:
+                    error_msg = str(exc)
+                    st.error(f"Failed to add knowledge: {error_msg}")
+                    logger.exception("Failed to add knowledge to emails: %s", exc)
+                    return  # Stop here if addition fails
+            
+            # Verify result was successfully obtained
+            if result is None:
+                st.error("Knowledge enrichment failed - no result returned")
+                logger.error("Knowledge enrichment returned None result")
+                return
+            
+            # Verify the knowledge was committed by querying a sample email in a fresh session
+            if result.updated > 0 and report_selection:
+                with session_scope() as verify_session:
+                    from app.db.models import InputEmail
+                    sample_email = verify_session.get(InputEmail, report_selection[0])
+                    if sample_email and sample_email.knowledge_data:
+                        logger.info("Verified knowledge_data exists for email %d after enrichment", report_selection[0])
+                    elif sample_email:
+                        logger.warning("knowledge_data is empty for email %d after enrichment", report_selection[0])
+            
+            # Build notification message
+            notification_parts = []
+            if result.matched_tns > 0:
+                notification_parts.append(f"{result.matched_tns} phone matches")
+            if result.matched_domains > 0:
+                notification_parts.append(f"{result.matched_domains} domain matches")
+            if result.updated > 0:
+                notification_parts.append(f"{result.updated} emails updated")
+            if result.errors > 0:
+                notification_parts.append(f"{result.errors} errors")
+            
+            if notification_parts:
+                state.add_notification(f"Added knowledge: {', '.join(notification_parts)}")
+            
+            # Show detailed results
+            if result.updated > 0:
+                success_msg = f"Knowledge enrichment completed:\n"
                 if result.matched_tns > 0:
-                    notification_parts.append(f"{result.matched_tns} phone matches")
+                    success_msg += f"- Phone number matches: {result.matched_tns}\n"
                 if result.matched_domains > 0:
-                    notification_parts.append(f"{result.matched_domains} domain matches")
-                if result.updated > 0:
-                    notification_parts.append(f"{result.updated} emails updated")
-                if result.errors > 0:
-                    notification_parts.append(f"{result.errors} errors")
-                
-                if notification_parts:
-                    state.add_notification(f"Added knowledge: {', '.join(notification_parts)}")
-                
-                # Show detailed results
-                if result.updated > 0:
-                    success_msg = f"Knowledge enrichment completed:\n"
-                    if result.matched_tns > 0:
-                        success_msg += f"- Phone number matches: {result.matched_tns}\n"
-                    if result.matched_domains > 0:
-                        success_msg += f"- Domain matches: {result.matched_domains}\n"
-                    success_msg += f"- Emails updated: {result.updated}"
-                    st.success(success_msg)
-                else:
-                    st.warning("⚠️ No emails were updated. Check that knowledge tables are initialized and columns are selected.")
-                
-                if result.errors > 0:
-                    st.warning(f"⚠️ {result.errors} emails had errors during processing.")
-                    if result.error_details:
-                        with st.expander(f"View {len(result.error_details)} error details", expanded=False):
-                            for error in result.error_details[:20]:  # Show first 20 errors
-                                st.text(error)
-                            if len(result.error_details) > 20:
-                                st.caption(f"... and {len(result.error_details) - 20} more errors")
-                
-                if result.updated > 0:
-                    st.rerun()
-            except ValueError as exc:
-                st.error(f"Cannot add knowledge: {exc}")
-            except Exception as exc:
-                st.error(f"Failed to add knowledge: {exc}")
-                logger.exception("Failed to add knowledge to emails")
+                    success_msg += f"- Domain matches: {result.matched_domains}\n"
+                success_msg += f"- Emails updated: {result.updated}"
+                st.success(success_msg)
+                st.rerun()  # Rerun to refresh the UI and show updated knowledge data
+            else:
+                st.warning("⚠️ No emails were updated. Check that knowledge tables are initialized and columns are selected.")
+            
+            if result.errors > 0:
+                st.warning(f"⚠️ {result.errors} emails had errors during processing.")
+                if result.error_details:
+                    with st.expander(f"View {len(result.error_details)} error details", expanded=False):
+                        for error in result.error_details[:20]:  # Show first 20 errors
+                            st.text(error)
+                        if len(result.error_details) > 20:
+                            st.caption(f"... and {len(result.error_details) - 20} more errors")
+        except Exception as exc:
+            error_msg = str(exc)
+            st.error(f"Unexpected error during knowledge enrichment: {error_msg}")
+            logger.exception("Unexpected error during knowledge enrichment")
     
     if generate_report:
         with session_scope() as session:

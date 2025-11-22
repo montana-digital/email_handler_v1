@@ -207,6 +207,7 @@ def _render_data_upload(state: AppState, table_name: str, display_name: str) -> 
             
             if st.button(f"Upload to {display_name}", key=f"btn_upload_{table_name}", type="primary"):
                 try:
+                    result = None
                     # Upload in one session
                     with session_scope() as session:
                         try:
@@ -223,6 +224,12 @@ def _render_data_upload(state: AppState, table_name: str, display_name: str) -> 
                             st.error(f"Failed to upload data: {error_msg}")
                             logger.exception("Failed to upload knowledge data to %s: %s", table_name, exc)
                             return  # Stop here if upload fails
+                    
+                    # Verify result was successfully obtained
+                    if result is None:
+                        st.error("Upload failed - no result returned")
+                        logger.error("Upload returned None result")
+                        return
                     
                     # Verify the upload was committed by querying record count in a fresh session
                     with session_scope() as verify_session:
